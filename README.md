@@ -1,0 +1,173 @@
+# chubbyts-undici-oidc
+
+[![CI](https://github.com/chubbyts/chubbyts-undici-oidc/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/chubbyts/chubbyts-undici-oidc/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/chubbyts/chubbyts-undici-oidc/badge.svg?branch=master)](https://coveralls.io/github/chubbyts/chubbyts-undici-oidc?branch=master)
+[![Mutation testing badge](https://img.shields.io/endpoint?style=flat&url=https%3A%2F%2Fbadge-api.stryker-mutator.io%2Fgithub.com%2Fchubbyts%2Fchubbyts-undici-oidc%2Fmaster)](https://dashboard.stryker-mutator.io/reports/github.com/chubbyts/chubbyts-undici-oidc/master)
+[![npm-version](https://img.shields.io/npm/v/@chubbyts/chubbyts-undici-oidc.svg)](https://www.npmjs.com/package/@chubbyts/chubbyts-undici-oidc)
+
+[![bugs](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=bugs)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![code_smells](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=code_smells)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![coverage](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=coverage)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![duplicated_lines_density](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=duplicated_lines_density)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![ncloc](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=ncloc)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![sqale_rating](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=sqale_rating)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![alert_status](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=alert_status)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![reliability_rating](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=reliability_rating)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![security_rating](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=security_rating)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![sqale_index](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=sqale_index)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+[![vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=chubbyts_chubbyts-undici-oidc&metric=vulnerabilities)](https://sonarcloud.io/dashboard?id=chubbyts_chubbyts-undici-oidc)
+
+## Description
+
+A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server. It resolves the openid configuration of the given issuer, verifies JWT based bearer tokens against the issuer's JWKS and passes the verified claims to the handler via request attributes.
+
+## Requirements
+
+ * node: 22
+ * [@chubbyts/chubbyts-undici-server][2]: ^1.2.0
+ * [jose][3]: ^6.2.8
+
+## Installation
+
+Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
+
+```ts
+npm i @chubbyts/chubbyts-undici-oidc@^1.0.0
+```
+
+## Usage
+
+```ts
+import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
+import { createOidcAuthenticationMiddleware } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
+import { createBearerTokenExtractor, createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
+import { Handler, Response, ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
+
+const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
+  createBearerTokenExtractor(),
+  createJwtTokenVerifier(createOidcConfigurationResolver('https://issuer.example.com'), {
+    audience: 'https://api.example.com',
+  }),
+  'api',
+);
+
+const handler: Handler = async (serverRequest: ServerRequest) => {
+  const { oidc } = serverRequest.attributes;
+
+  return new Response(JSON.stringify(oidc), { headers: { 'content-type': 'application/json' } });
+};
+
+(async () => {
+  const serverRequest = new ServerRequest('https://api.example.com/resource', {
+    headers: { authorization: 'Bearer some-jwt-based-token' },
+  });
+  const response = await oidcAuthenticationMiddleware(serverRequest, handler);
+})();
+```
+
+If the request does not contain a valid bearer token, the middleware returns a `401` response with a `WWW-Authenticate` challenge and the handler does not get called. On success the handler receives a request with the `oidc` attribute: `{ token: string, claims: JWTPayload }`.
+
+**Warning:** Always pass the `audience` option and make sure it matches the audience (`aud` claim) your authorization server assigns to access tokens meant for your API. Without it, any valid token of the issuer gets accepted, even ones issued for other APIs.
+
+### discovery
+
+#### createOidcConfigurationResolver
+
+Resolves the openid configuration from `{issuer}/.well-known/openid-configuration`, validates the issuer and caches the result (default: 3600 seconds).
+
+```ts
+import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
+
+const oidcConfigurationResolver = createOidcConfigurationResolver('https://issuer.example.com', fetch, 3600);
+```
+
+### token
+
+#### createBearerTokenExtractor
+
+Extracts the bearer token from the `Authorization` request header.
+
+```ts
+import { createBearerTokenExtractor } from '@chubbyts/chubbyts-undici-oidc/dist/token';
+
+const tokenExtractor = createBearerTokenExtractor();
+```
+
+#### createJwtTokenVerifier
+
+Verifies a JWT based token (signature via the issuer's JWKS, `iss`, `exp`, `nbf` and optionally `aud` and allowed algorithms) and returns its claims.
+
+```ts
+import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
+import { createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
+
+const tokenVerifier = createJwtTokenVerifier(createOidcConfigurationResolver('https://issuer.example.com'), {
+  audience: 'https://api.example.com',
+  algorithms: ['RS256'],
+  clockTolerance: 5,
+});
+```
+
+### middleware
+
+#### createOidcAuthenticationMiddleware
+
+```ts
+import { createOidcAuthenticationMiddleware } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
+import { createBearerTokenExtractor, createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
+
+const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'api');
+```
+
+## Testing against a local OIDC provider
+
+The easiest way to test the integration manually is [Keycloak][4] as a docker container:
+
+```sh
+docker run --rm -p 8080:8080 \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+  -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+  quay.io/keycloak/keycloak:26.4 start-dev
+```
+
+Within the admin console at http://localhost:8080 (admin/admin):
+
+ 1. Create a realm `test`.
+ 2. Create a client `api` with *Client authentication* and the *Service accounts roles* flow enabled.
+
+```sh
+# the openid configuration resolved by createOidcConfigurationResolver
+curl http://localhost:8080/realms/test/.well-known/openid-configuration
+
+# get a real access token
+curl -X POST http://localhost:8080/realms/test/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=api -d client_secret=<client-secret>
+```
+
+```ts
+const oidcConfigurationResolver = createOidcConfigurationResolver('http://localhost:8080/realms/test');
+```
+
+Things to be aware of:
+
+ * **Audience:** Keycloak access tokens contain `aud: "account"` by default. With the `audience` option set, verification fails with `unexpected "aud" claim value` until you add an *audience mapper* to the client scope.
+ * **Issuer:** The `iss` claim matches the URL the token was requested through. Use the same host for the resolver and the token request (do not mix `localhost` and `127.0.0.1`), otherwise the issuer validation fails.
+
+For automated integration tests (e.g. within CI) [mock-oauth2-server][5] (`ghcr.io/navikt/mock-oauth2-server`) is a lightweight alternative which issues tokens for any client without any setup. This repository ships such an integration test suite:
+
+```sh
+pnpm test:integration --run
+```
+
+It starts the mock-oauth2-server container via [testcontainers][6] on a random port (and stops it afterwards), fetches real tokens through the `client_credentials` grant and runs them through the whole middleware stack. A docker compatible daemon (docker, podman, colima, ...) needs to be running. If a server is already running (or reachable elsewhere), it gets reused instead: set `MOCK_OAUTH2_SERVER_URL` (default: `http://localhost:8080`) to point at it.
+
+## Copyright
+
+2026 Dominik Zogg
+
+[1]: https://www.npmjs.com/package/@chubbyts/chubbyts-undici-oidc
+[2]: https://www.npmjs.com/package/@chubbyts/chubbyts-undici-server
+[3]: https://www.npmjs.com/package/jose
+[4]: https://www.keycloak.org
+[5]: https://github.com/navikt/mock-oauth2-server
+[6]: https://www.npmjs.com/package/testcontainers

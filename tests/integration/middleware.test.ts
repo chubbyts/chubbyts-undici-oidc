@@ -62,7 +62,9 @@ test('with invalid token', async () => {
   const response = await createMiddleware()(serverRequest, handler);
 
   expect(response.status).toBe(401);
-  expect(response.headers.get('www-authenticate')).toContain('Bearer realm="api", error="invalid_token"');
+  expect(response.headers.get('www-authenticate')).toBe(
+    'Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"',
+  );
 });
 
 test('with valid token', async () => {
@@ -107,6 +109,7 @@ test('with valid token and wrong audience', async () => {
   const response = await createMiddleware({ audience: 'https://other-api.example.com' })(serverRequest, handler);
 
   expect(response.status).toBe(401);
-  expect(response.headers.get('www-authenticate')).toContain('error="invalid_token"');
-  expect(response.headers.get('www-authenticate')).toContain('aud');
+  expect(response.headers.get('www-authenticate')).toBe(
+    'Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"',
+  );
 });

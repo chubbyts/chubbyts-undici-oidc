@@ -38,6 +38,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@chubbyts/chubbyts-log-types": "^3.3.0",
     "@chubbyts/chubbyts-undici-server": "^1.2.0",
     "jose": "^6.2.8"
   },

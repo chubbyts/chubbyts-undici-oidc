@@ -24,8 +24,9 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 ## Requirements
 
  * node: 22
- * [@chubbyts/chubbyts-undici-server][2]: ^1.2.0
- * [jose][3]: ^6.2.8
+ * [@chubbyts/chubbyts-log-types][2]: ^3.3.0
+ * [@chubbyts/chubbyts-undici-server][3]: ^1.2.0
+ * [jose][4]: ^6.2.8
 
 ## Installation
 
@@ -65,7 +66,7 @@ const handler: Handler = async (serverRequest: ServerRequest) => {
 })();
 ```
 
-If the request does not contain a valid bearer token, the middleware returns a `401` response with a `WWW-Authenticate` challenge and the handler does not get called. On success the handler receives a request with the `oidc` attribute: `{ token: string, claims: JWTPayload }`.
+If the request does not contain a valid bearer token, the middleware returns a `401` response with a `WWW-Authenticate` challenge and the handler does not get called. The challenge never contains the actual verification error (it may leak internal details like the issuer or jwks uri); the reason gets logged with level `info` via the optional logger instead. Errors which are not related to the token itself (unreachable discovery / jwks endpoint, ...) get rethrown, so your error handling (e.g. an error middleware) can log them and respond with a `5xx` status. On success the handler receives a request with the `oidc` attribute: `{ token: string, claims: JWTPayload }`.
 
 **Warning:** Always pass the `audience` option and make sure it matches the audience (`aud` claim) your authorization server assigns to access tokens meant for your API. Without it, any valid token of the issuer gets accepted, even ones issued for other APIs.
 
@@ -95,7 +96,7 @@ const tokenExtractor = createBearerTokenExtractor();
 
 #### createJwtTokenVerifier
 
-Verifies a JWT based token (signature via the issuer's JWKS, `iss`, `exp`, `nbf` and optionally `aud` and allowed algorithms) and returns its claims.
+Verifies a JWT based token (signature via the issuer's JWKS, `iss`, `exp`, `nbf` and optionally `aud` and allowed algorithms) and returns its claims. Throws an `InvalidTokenError` (see `error`) if the token itself is invalid, any other error (e.g. discovery or jwks fetch failure) gets passed through.
 
 ```ts
 import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
@@ -113,15 +114,33 @@ const tokenVerifier = createJwtTokenVerifier(createOidcConfigurationResolver('ht
 #### createOidcAuthenticationMiddleware
 
 ```ts
+import { createLogger } from '@chubbyts/chubbyts-log-types/dist/log';
 import { createOidcAuthenticationMiddleware } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
 import { createBearerTokenExtractor, createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
 
-const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'api');
+const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
+  tokenExtractor,
+  tokenVerifier,
+  'api',
+  createLogger(),
+);
+```
+
+### error
+
+#### InvalidTokenError
+
+Thrown by the token verifier if the token itself is invalid (malformed, wrong signature, expired, wrong issuer / audience, ...). Custom `TokenVerifier` implementations need to throw it to get the `401` response, any other error gets rethrown by the middleware.
+
+```ts
+import { InvalidTokenError } from '@chubbyts/chubbyts-undici-oidc/dist/error';
+
+throw new InvalidTokenError('token expired', cause);
 ```
 
 ## Testing against a local OIDC provider
 
-The easiest way to test the integration manually is [Keycloak][4] as a docker container:
+The easiest way to test the integration manually is [Keycloak][5] as a docker container:
 
 ```sh
 docker run --rm -p 8080:8080 \
@@ -153,21 +172,22 @@ Things to be aware of:
  * **Audience:** Keycloak access tokens contain `aud: "account"` by default. With the `audience` option set, verification fails with `unexpected "aud" claim value` until you add an *audience mapper* to the client scope.
  * **Issuer:** The `iss` claim matches the URL the token was requested through. Use the same host for the resolver and the token request (do not mix `localhost` and `127.0.0.1`), otherwise the issuer validation fails.
 
-For automated integration tests (e.g. within CI) [mock-oauth2-server][5] (`ghcr.io/navikt/mock-oauth2-server`) is a lightweight alternative which issues tokens for any client without any setup. This repository ships such an integration test suite:
+For automated integration tests (e.g. within CI) [mock-oauth2-server][6] (`ghcr.io/navikt/mock-oauth2-server`) is a lightweight alternative which issues tokens for any client without any setup. This repository ships such an integration test suite:
 
 ```sh
 pnpm test:integration --run
 ```
 
-It starts the mock-oauth2-server container via [testcontainers][6] on a random port (and stops it afterwards), fetches real tokens through the `client_credentials` grant and runs them through the whole middleware stack. A docker compatible daemon (docker, podman, colima, ...) needs to be running. If a server is already running (or reachable elsewhere), it gets reused instead: set `MOCK_OAUTH2_SERVER_URL` (default: `http://localhost:8080`) to point at it.
+It starts the mock-oauth2-server container via [testcontainers][7] on a random port (and stops it afterwards), fetches real tokens through the `client_credentials` grant and runs them through the whole middleware stack. A docker compatible daemon (docker, podman, colima, ...) needs to be running. If a server is already running (or reachable elsewhere), it gets reused instead: set `MOCK_OAUTH2_SERVER_URL` (default: `http://localhost:8080`) to point at it.
 
 ## Copyright
 
 2026 Dominik Zogg
 
 [1]: https://www.npmjs.com/package/@chubbyts/chubbyts-undici-oidc
-[2]: https://www.npmjs.com/package/@chubbyts/chubbyts-undici-server
-[3]: https://www.npmjs.com/package/jose
-[4]: https://www.keycloak.org
-[5]: https://github.com/navikt/mock-oauth2-server
-[6]: https://www.npmjs.com/package/testcontainers
+[2]: https://www.npmjs.com/package/@chubbyts/chubbyts-log-types
+[3]: https://www.npmjs.com/package/@chubbyts/chubbyts-undici-server
+[4]: https://www.npmjs.com/package/jose
+[5]: https://www.keycloak.org
+[6]: https://github.com/navikt/mock-oauth2-server
+[7]: https://www.npmjs.com/package/testcontainers

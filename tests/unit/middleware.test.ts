@@ -1,8 +1,11 @@
 import { expect, test } from 'vitest';
 import { useFunctionMock } from '@chubbyts/chubbyts-function-mock/dist/function-mock';
+import { useObjectMock } from '@chubbyts/chubbyts-function-mock/dist/object-mock';
+import type { Logger } from '@chubbyts/chubbyts-log-types/dist/log';
 import type { Handler } from '@chubbyts/chubbyts-undici-server/dist/server';
 import { Response, ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 import type { TokenExtractor, TokenVerifier } from '../../src/token';
+import { InvalidTokenError } from '../../src/error';
 import { createOidcAuthenticationMiddleware } from '../../src/middleware';
 
 test('without token, without realm', async () => {
@@ -57,7 +60,81 @@ test('without token, with realm', async () => {
   expect(handlerMocks).toHaveLength(0);
 });
 
+test('without token, with realm containing double quotes', async () => {
+  const serverRequest = new ServerRequest('https://api.example.com/resource');
+
+  const [tokenExtractor, tokenExtractorMocks] = useFunctionMock<TokenExtractor>([
+    { parameters: [serverRequest], return: undefined },
+  ]);
+
+  const [tokenVerifier, tokenVerifierMocks] = useFunctionMock<TokenVerifier>([]);
+
+  const [handler, handlerMocks] = useFunctionMock<Handler>([]);
+
+  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'my "api"');
+
+  const response = await middleware(serverRequest, handler);
+
+  expect(response.status).toBe(401);
+  expect(response.statusText).toBe('Unauthorized');
+  expect(Object.fromEntries(response.headers.entries())).toEqual({
+    'www-authenticate': `Bearer realm="my 'api'"`,
+  });
+
+  expect(tokenExtractorMocks).toHaveLength(0);
+  expect(tokenVerifierMocks).toHaveLength(0);
+  expect(handlerMocks).toHaveLength(0);
+});
+
 test('with invalid token', async () => {
+  const serverRequest = new ServerRequest('https://api.example.com/resource?key=value', {
+    headers: { authorization: 'Bearer token-1' },
+  });
+
+  const cause = new Error('"exp" claim timestamp check failed');
+
+  const [tokenExtractor, tokenExtractorMocks] = useFunctionMock<TokenExtractor>([
+    { parameters: [serverRequest], return: 'token-1' },
+  ]);
+
+  const [tokenVerifier, tokenVerifierMocks] = useFunctionMock<TokenVerifier>([
+    { parameters: ['token-1'], error: new InvalidTokenError('"exp" claim timestamp check failed', cause) },
+  ]);
+
+  const [handler, handlerMocks] = useFunctionMock<Handler>([]);
+
+  const [logger, loggerMocks] = useObjectMock<Logger>([
+    {
+      name: 'info',
+      parameters: [
+        'Invalid token',
+        {
+          method: 'GET',
+          pathnameSearch: '/resource?key=value',
+          error: { name: 'InvalidTokenError', message: '"exp" claim timestamp check failed', cause },
+        },
+      ],
+    },
+  ]);
+
+  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'api', logger);
+
+  const response = await middleware(serverRequest, handler);
+
+  expect(response.status).toBe(401);
+  expect(response.statusText).toBe('Unauthorized');
+  expect(Object.fromEntries(response.headers.entries())).toEqual({
+    'www-authenticate':
+      'Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"',
+  });
+
+  expect(tokenExtractorMocks).toHaveLength(0);
+  expect(tokenVerifierMocks).toHaveLength(0);
+  expect(handlerMocks).toHaveLength(0);
+  expect(loggerMocks).toHaveLength(0);
+});
+
+test('with invalid token, without realm and default logger', async () => {
   const serverRequest = new ServerRequest('https://api.example.com/resource', {
     headers: { authorization: 'Bearer token-1' },
   });
@@ -67,20 +144,19 @@ test('with invalid token', async () => {
   ]);
 
   const [tokenVerifier, tokenVerifierMocks] = useFunctionMock<TokenVerifier>([
-    { parameters: ['token-1'], error: new Error('"exp" claim timestamp check failed') },
+    { parameters: ['token-1'], error: new InvalidTokenError('Invalid Compact JWS') },
   ]);
 
   const [handler, handlerMocks] = useFunctionMock<Handler>([]);
 
-  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'api');
+  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier);
 
   const response = await middleware(serverRequest, handler);
 
   expect(response.status).toBe(401);
   expect(response.statusText).toBe('Unauthorized');
   expect(Object.fromEntries(response.headers.entries())).toEqual({
-    'www-authenticate':
-      'Bearer realm="api", error="invalid_token", error_description="\'exp\' claim timestamp check failed"',
+    'www-authenticate': 'Bearer error="invalid_token", error_description="The access token is invalid or expired"',
   });
 
   expect(tokenExtractorMocks).toHaveLength(0);
@@ -88,7 +164,34 @@ test('with invalid token', async () => {
   expect(handlerMocks).toHaveLength(0);
 });
 
-test('with invalid token and none error rejection', async () => {
+test('with failing token verifier', async () => {
+  const serverRequest = new ServerRequest('https://api.example.com/resource', {
+    headers: { authorization: 'Bearer token-1' },
+  });
+
+  const error = new Error('Cannot fetch oidc configuration from "https://issuer.example.com": status 500');
+
+  const [tokenExtractor, tokenExtractorMocks] = useFunctionMock<TokenExtractor>([
+    { parameters: [serverRequest], return: 'token-1' },
+  ]);
+
+  const [tokenVerifier, tokenVerifierMocks] = useFunctionMock<TokenVerifier>([{ parameters: ['token-1'], error }]);
+
+  const [handler, handlerMocks] = useFunctionMock<Handler>([]);
+
+  const [logger, loggerMocks] = useObjectMock<Logger>([]);
+
+  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'api', logger);
+
+  await expect(middleware(serverRequest, handler)).rejects.toBe(error);
+
+  expect(tokenExtractorMocks).toHaveLength(0);
+  expect(tokenVerifierMocks).toHaveLength(0);
+  expect(handlerMocks).toHaveLength(0);
+  expect(loggerMocks).toHaveLength(0);
+});
+
+test('with failing token verifier and none error rejection', async () => {
   const serverRequest = new ServerRequest('https://api.example.com/resource', {
     headers: { authorization: 'Bearer token-1' },
   });
@@ -109,13 +212,7 @@ test('with invalid token and none error rejection', async () => {
 
   const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier);
 
-  const response = await middleware(serverRequest, handler);
-
-  expect(response.status).toBe(401);
-  expect(response.statusText).toBe('Unauthorized');
-  expect(Object.fromEntries(response.headers.entries())).toEqual({
-    'www-authenticate': 'Bearer error="invalid_token", error_description="unknown error"',
-  });
+  await expect(middleware(serverRequest, handler)).rejects.toBe('some none error rejection');
 
   expect(tokenExtractorMocks).toHaveLength(0);
   expect(tokenVerifierMocks).toHaveLength(0);

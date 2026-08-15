@@ -1,7 +1,8 @@
 import type { JWTPayload } from 'jose';
-import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
+import { createRemoteJWKSet, customFetch, errors, jwtVerify } from 'jose';
 import type { ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 import type { OidcConfigurationResolver } from './discovery.js';
+import { InvalidTokenError } from './error.js';
 
 export type TokenExtractor = (request: ServerRequest) => string | undefined;
 
@@ -23,6 +24,19 @@ export type JwtTokenVerifierOptions = {
 };
 
 type JwkSetResolver = ReturnType<typeof createRemoteJWKSet>;
+
+const isTokenError = (error: unknown): error is errors.JOSEError => {
+  return (
+    error instanceof errors.JWTInvalid ||
+    error instanceof errors.JWSInvalid ||
+    error instanceof errors.JWTExpired ||
+    error instanceof errors.JWTClaimValidationFailed ||
+    error instanceof errors.JOSEAlgNotAllowed ||
+    error instanceof errors.JOSENotSupported ||
+    error instanceof errors.JWKSNoMatchingKey ||
+    error instanceof errors.JWSSignatureVerificationFailed
+  );
+};
 
 export const createJwtTokenVerifier = (
   oidcConfigurationResolver: OidcConfigurationResolver,
@@ -49,13 +63,21 @@ export const createJwtTokenVerifier = (
   return async (token: string): Promise<JWTPayload> => {
     const configuration = await oidcConfigurationResolver();
 
-    const { payload } = await jwtVerify(token, resolveJwkSet(configuration.jwks_uri), {
-      issuer: configuration.issuer,
-      audience: options.audience,
-      algorithms: options.algorithms,
-      clockTolerance: options.clockTolerance,
-    });
+    try {
+      const { payload } = await jwtVerify(token, resolveJwkSet(configuration.jwks_uri), {
+        issuer: configuration.issuer,
+        audience: options.audience,
+        algorithms: options.algorithms,
+        clockTolerance: options.clockTolerance,
+      });
 
-    return payload;
+      return payload;
+    } catch (error) {
+      if (isTokenError(error)) {
+        throw new InvalidTokenError(error.message, error);
+      }
+
+      throw error;
+    }
   };
 };

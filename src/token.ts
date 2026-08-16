@@ -17,9 +17,11 @@ export const createBearerTokenExtractor = (): TokenExtractor => {
 export type TokenVerifier = (token: string) => Promise<JWTPayload>;
 
 export type JwtTokenVerifierOptions = {
-  audience?: string | Array<string>;
+  audience: string | Array<string>;
   algorithms?: Array<string>;
   clockTolerance?: number;
+  typ?: string;
+  requiredClaims?: Array<string>;
   fetch?: typeof globalThis.fetch;
 };
 
@@ -40,8 +42,12 @@ const isTokenError = (error: unknown): error is errors.JOSEError => {
 
 export const createJwtTokenVerifier = (
   oidcConfigurationResolver: OidcConfigurationResolver,
-  options: JwtTokenVerifierOptions = {},
+  options: JwtTokenVerifierOptions,
 ): TokenVerifier => {
+  // "iss" and "aud" get required by jose through the issuer / audience options, "exp" needs to be required explicitly,
+  // otherwise a token without expiration would be valid forever
+  const requiredClaims = ['exp', ...(options.requiredClaims ?? [])];
+
   // oxlint-disable-next-line functional/no-let
   let cache: { jwksUri: string; jwkSetResolver: JwkSetResolver } | undefined;
 
@@ -69,6 +75,8 @@ export const createJwtTokenVerifier = (
         audience: options.audience,
         algorithms: options.algorithms,
         clockTolerance: options.clockTolerance,
+        typ: options.typ,
+        requiredClaims,
       });
 
       return payload;

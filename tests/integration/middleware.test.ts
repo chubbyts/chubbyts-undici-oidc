@@ -27,9 +27,13 @@ const fetchAccessToken = async (): Promise<string> => {
   return accessToken;
 };
 
-const decodeClaims = (token: string): { aud: string | Array<string> } => {
-  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as { aud: string | Array<string> };
+const decodePart = <T>(token: string, index: number): T => {
+  return JSON.parse(Buffer.from(token.split('.')[index], 'base64url').toString()) as T;
 };
+
+const decodeHeader = (token: string): { typ: string } => decodePart(token, 0);
+
+const decodeClaims = (token: string): { aud: string | Array<string> } => decodePart(token, 1);
 
 const handler: Handler = async (serverRequest: ServerRequest): Promise<Response> => {
   return new Response(JSON.stringify(serverRequest.attributes.oidc), {
@@ -37,7 +41,7 @@ const handler: Handler = async (serverRequest: ServerRequest): Promise<Response>
   });
 };
 
-const createMiddleware = (options: JwtTokenVerifierOptions = {}): Middleware => {
+const createMiddleware = (options: JwtTokenVerifierOptions): Middleware => {
   return createOidcAuthenticationMiddleware(
     createBearerTokenExtractor(),
     createJwtTokenVerifier(createOidcConfigurationResolver(issuer), options),
@@ -48,7 +52,7 @@ const createMiddleware = (options: JwtTokenVerifierOptions = {}): Middleware => 
 test('without token', async () => {
   const serverRequest = new ServerRequest('https://api.example.com/resource');
 
-  const response = await createMiddleware()(serverRequest, handler);
+  const response = await createMiddleware({ audience: 'https://api.example.com' })(serverRequest, handler);
 
   expect(response.status).toBe(401);
   expect(response.headers.get('www-authenticate')).toBe('Bearer realm="api"');
@@ -59,7 +63,7 @@ test('with invalid token', async () => {
     headers: { authorization: 'Bearer invalid-token' },
   });
 
-  const response = await createMiddleware()(serverRequest, handler);
+  const response = await createMiddleware({ audience: 'https://api.example.com' })(serverRequest, handler);
 
   expect(response.status).toBe(401);
   expect(response.headers.get('www-authenticate')).toBe(
@@ -68,24 +72,6 @@ test('with invalid token', async () => {
 });
 
 test('with valid token', async () => {
-  const accessToken = await fetchAccessToken();
-
-  const serverRequest = new ServerRequest('https://api.example.com/resource', {
-    headers: { authorization: `Bearer ${accessToken}` },
-  });
-
-  const response = await createMiddleware()(serverRequest, handler);
-
-  expect(response.status).toBe(200);
-
-  const oidc = (await response.json()) as { token: string; claims: { iss: string; sub: string } };
-
-  expect(oidc.token).toBe(accessToken);
-  expect(oidc.claims.iss).toBe(issuer);
-  expect(oidc.claims.sub).toBe('api');
-});
-
-test('with valid token and matching audience', async () => {
   const accessToken = await fetchAccessToken();
 
   const { aud } = decodeClaims(accessToken);
@@ -97,6 +83,44 @@ test('with valid token and matching audience', async () => {
   const response = await createMiddleware({ audience: aud })(serverRequest, handler);
 
   expect(response.status).toBe(200);
+
+  const oidc = (await response.json()) as { token: string; claims: { iss: string; sub: string } };
+
+  expect(oidc.token).toBe(accessToken);
+  expect(oidc.claims.iss).toBe(issuer);
+  expect(oidc.claims.sub).toBe('api');
+});
+
+test('with valid token and matching typ', async () => {
+  const accessToken = await fetchAccessToken();
+
+  const { typ } = decodeHeader(accessToken);
+  const { aud } = decodeClaims(accessToken);
+
+  const serverRequest = new ServerRequest('https://api.example.com/resource', {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+
+  const response = await createMiddleware({ audience: aud, typ })(serverRequest, handler);
+
+  expect(response.status).toBe(200);
+});
+
+test('with valid token and wrong typ', async () => {
+  const accessToken = await fetchAccessToken();
+
+  const { aud } = decodeClaims(accessToken);
+
+  const serverRequest = new ServerRequest('https://api.example.com/resource', {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+
+  const response = await createMiddleware({ audience: aud, typ: 'other+jwt' })(serverRequest, handler);
+
+  expect(response.status).toBe(401);
+  expect(response.headers.get('www-authenticate')).toBe(
+    'Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"',
+  );
 });
 
 test('with valid token and wrong audience', async () => {

@@ -48,15 +48,25 @@ const createKeyAndJwks = async (): Promise<{ privateKey: KeyObject; jwks: unknow
 
 const createToken = async (
   privateKey: KeyObject,
-  { iss, aud, iat, kid }: { iss?: string; aud?: string; iat?: number; kid?: string } = {},
+  {
+    iss,
+    aud,
+    iat,
+    kid,
+    typ,
+    withExp = true,
+  }: { iss?: string; aud?: string; iat?: number; kid?: string; typ?: string; withExp?: boolean } = {},
 ): Promise<string> => {
   const signJwt = new SignJWT({ scope: 'openid' })
-    .setProtectedHeader({ alg: 'RS256', kid: kid ?? 'key-1' })
+    .setProtectedHeader({ alg: 'RS256', kid: kid ?? 'key-1', ...(typ ? { typ } : {}) })
     .setSubject('subject-1')
     .setIssuer(iss ?? issuer)
     .setAudience(aud ?? 'audience-1')
-    .setIssuedAt(iat)
-    .setExpirationTime((iat ?? Math.floor(Date.now() / 1000)) + 300);
+    .setIssuedAt(iat);
+
+  if (withExp) {
+    signJwt.setExpirationTime((iat ?? Math.floor(Date.now() / 1000)) + 300);
+  }
 
   return signJwt.sign(privateKey);
 };
@@ -274,6 +284,117 @@ test('verify expired token within clock tolerance', async () => {
   expect(fetchMocks).toHaveLength(0);
 });
 
+test('verify token without expiration', async () => {
+  const { privateKey, jwks } = await createKeyAndJwks();
+
+  const token = await createToken(privateKey, { withExp: false });
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async () => createJwksResponse(jwks),
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, { audience: 'audience-1', fetch });
+
+  await expectInvalidTokenError(tokenVerifier(token), 'missing required "exp" claim', errors.JWTClaimValidationFailed);
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test('verify token with missing required claim', async () => {
+  const { privateKey, jwks } = await createKeyAndJwks();
+
+  const token = await createToken(privateKey);
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async () => createJwksResponse(jwks),
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+    audience: 'audience-1',
+    requiredClaims: ['sub', 'jti'],
+    fetch,
+  });
+
+  await expectInvalidTokenError(tokenVerifier(token), 'missing required "jti" claim', errors.JWTClaimValidationFailed);
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test('verify token with matching typ', async () => {
+  const { privateKey, jwks } = await createKeyAndJwks();
+
+  const token = await createToken(privateKey, { typ: 'at+jwt' });
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async () => createJwksResponse(jwks),
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+    audience: 'audience-1',
+    typ: 'at+jwt',
+    fetch,
+  });
+
+  expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test.each<{ name: string; typ: string | undefined }>([
+  { name: 'without typ', typ: undefined },
+  { name: 'with other typ', typ: 'JWT' },
+])('verify token $name and expected typ', async ({ typ }) => {
+  const { privateKey, jwks } = await createKeyAndJwks();
+
+  const token = await createToken(privateKey, { typ });
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async () => createJwksResponse(jwks),
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+    audience: 'audience-1',
+    typ: 'at+jwt',
+    fetch,
+  });
+
+  await expectInvalidTokenError(
+    tokenVerifier(token),
+    'unexpected "typ" JWT header value',
+    errors.JWTClaimValidationFailed,
+  );
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
 test('verify token with not allowed algorithm', async () => {
   const { privateKey } = await createKeyAndJwks();
 
@@ -306,7 +427,7 @@ test('verify invalid token with default options', async () => {
     { parameters: [], return: Promise.resolve(configuration) },
   ]);
 
-  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver);
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, { audience: 'audience-1' });
 
   await expectInvalidTokenError(tokenVerifier('invalid'), 'Invalid Compact JWS', errors.JWSInvalid);
 

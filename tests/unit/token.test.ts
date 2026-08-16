@@ -92,6 +92,22 @@ const expectInvalidTokenError = async (
   expect(((error as InvalidTokenError).cause as Error).message).toBe(message);
 };
 
+test.each<{ name: string; audience: unknown }>([
+  { name: 'undefined', audience: undefined },
+  { name: 'empty string', audience: '' },
+  { name: 'empty array', audience: [] },
+  { name: 'array with empty string', audience: ['audience-1', ''] },
+  { name: 'non string', audience: 123 },
+])('create verifier with invalid audience: $name', ({ audience }) => {
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([]);
+
+  expect(() => createJwtTokenVerifier(oidcConfigurationResolver, { audience: audience as string })).toThrow(
+    'Invalid audience: must be a non-empty string or a non-empty array of non-empty strings',
+  );
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+});
+
 test('verify token', async () => {
   const { privateKey, jwks } = await createKeyAndJwks();
 

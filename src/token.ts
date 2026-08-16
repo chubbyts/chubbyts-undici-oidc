@@ -27,6 +27,12 @@ export type JwtTokenVerifierOptions = {
 
 type JwkSetResolver = ReturnType<typeof createRemoteJWKSet>;
 
+const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== '';
+
+const isNonEmptyAudience = (value: unknown): value is string | Array<string> => {
+  return isNonEmptyString(value) || (Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString));
+};
+
 const isTokenError = (error: unknown): error is errors.JOSEError => {
   return (
     error instanceof errors.JWTInvalid ||
@@ -47,6 +53,12 @@ export const createJwtTokenVerifier = (
   oidcConfigurationResolver: OidcConfigurationResolver,
   options: JwtTokenVerifierOptions,
 ): TokenVerifier => {
+  // typescript enforces the audience, but a runtime check protects javascript consumers (or a misconfigured
+  // "undefined") from silently skipping the audience check and accepting any token of the issuer
+  if (!isNonEmptyAudience(options.audience)) {
+    throw new Error('Invalid audience: must be a non-empty string or a non-empty array of non-empty strings');
+  }
+
   // "iss" and "aud" get required by jose through the issuer / audience options, "exp" needs to be required explicitly,
   // otherwise a token without expiration would be valid forever
   const requiredClaims = ['exp', ...(options.requiredClaims ?? [])];

@@ -82,6 +82,16 @@ export const createOidcConfigurationResolver = (
     return configuration;
   };
 
+  // an issuer outage should not take the resource server down: keep serving the last known configuration (the jwks
+  // itself is fetched and cached separately) and only fail if there never was one
+  const resolveStaleConfiguration = (error: unknown): OidcConfiguration => {
+    if (cache) {
+      return cache.configuration;
+    }
+
+    throw error;
+  };
+
   const resolveConfiguration = async (): Promise<OidcConfiguration> => {
     try {
       const configuration = await fetchConfiguration();
@@ -94,7 +104,7 @@ export const createOidcConfigurationResolver = (
       // fail fast during an outage instead of hitting the issuer with every request
       failure = { error, retryAfter: Date.now() + cooldown * 1000 };
 
-      throw error;
+      return resolveStaleConfiguration(error);
     } finally {
       pending = undefined;
     }
@@ -106,7 +116,7 @@ export const createOidcConfigurationResolver = (
     }
 
     if (failure && failure.retryAfter > Date.now()) {
-      throw failure.error;
+      return resolveStaleConfiguration(failure.error);
     }
 
     // concurrent cache misses share one in-flight request

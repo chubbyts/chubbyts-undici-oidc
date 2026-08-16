@@ -23,7 +23,7 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 
 ## Requirements
 
- * node: 22
+ * node: >=22
  * [@chubbyts/chubbyts-log-types][2]: ^3.3.0
  * [@chubbyts/chubbyts-undici-server][3]: ^1.2.0
  * [jose][4]: ^6.2.8
@@ -80,12 +80,12 @@ const oidcConfigurationResolver = createOidcConfigurationResolver('https://issue
   fetch, // custom fetch for the discovery request, default: globalThis.fetch
   maxAge: 3600, // seconds a resolved configuration is cached, default: 3600
   timeout: 5, // seconds until the discovery request is aborted, default: 5
-  cooldown: 30, // seconds a failed resolution is cached (fail fast during an outage), default: 30
+  cooldown: 30, // seconds until a failed (re)fetch is retried, default: 30
 });
 
 // verifies signature (via the issuer's JWKS), "iss", "aud", "exp", "nbf" and returns the claims
 const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
-  audience: 'https://api.example.com', // string | Array<string>, required
+  audience: 'https://api.example.com', // string | Array<string>, required (non-empty, enforced at runtime)
   algorithms: ['RS256'], // default: any asymmetric algorithm supported by jose
   clockTolerance: 5, // seconds, default: 0
   typ: 'at+jwt', // expected "typ" header, default: not checked
@@ -102,6 +102,7 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
 ```
 
  * **Issuer:** Must be exactly the `issuer` from the openid configuration (`iss` claim), `https://issuer.example.com` and `https://issuer.example.com/` are not the same. Use `https` in production, plain `http` is only meant for local development.
+ * **Outages:** If the issuer is unreachable while the cached configuration is expired, the last known configuration keeps being served (and a refetch is retried after `cooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful resolution the error is thrown (`5xx`).
  * **JWKS:** Fetched and cached in memory by [jose][4]'s `createRemoteJWKSet`, unknown key ids (key rotation) trigger a rate limited refetch.
  * **Custom verifier:** A `TokenVerifier` is just `(token: string) => Promise<JWTPayload>`. Throw an `InvalidTokenError` (`@chubbyts/chubbyts-undici-oidc/dist/error`) to get the `401` response, any other error is rethrown.
 

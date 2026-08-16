@@ -311,6 +311,48 @@ test('resolve configuration with failure cooldown', async () => {
   }
 });
 
+test('resolve configuration with expired cache and failed refresh', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      createFetchMock(url, new Response(JSON.stringify(configuration))),
+      createFetchMock(url, new Response(undefined, { status: 500 })),
+      createFetchMock(
+        url,
+        new Response(JSON.stringify({ ...configuration, jwks_uri: 'https://issuer.example.com/jwks2' })),
+      ),
+    ]);
+
+    const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch, maxAge: 10, cooldown: 10 });
+
+    expect(await oidcConfigurationResolver()).toEqual(configuration);
+
+    vi.advanceTimersByTime(10000);
+
+    // expired cache, failed refresh: serve the stale configuration instead of failing
+    expect(await oidcConfigurationResolver()).toEqual(configuration);
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(9999);
+
+    // within cooldown: still stale, no fetch
+    expect(await oidcConfigurationResolver()).toEqual(configuration);
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(1);
+
+    // after cooldown: fetch again, success replaces the stale configuration
+    expect(await oidcConfigurationResolver()).toEqual({
+      ...configuration,
+      jwks_uri: 'https://issuer.example.com/jwks2',
+    });
+    expect(fetchMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('resolve configuration without failure cooldown', async () => {
   const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
     createFetchMock(url, new Response(undefined, { status: 500 })),

@@ -3,7 +3,15 @@
   "type": "module",
   "version": "1.0.0-beta.5",
   "description": "A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server.",
-  "keywords": [],
+  "keywords": [
+    "oidc",
+    "openid-connect",
+    "jwt",
+    "jwks",
+    "bearer",
+    "middleware",
+    "undici"
+  ],
   "author": "Dominik Zogg",
   "license": "MIT",
   "repository": "chubbyts/chubbyts-undici-oidc",

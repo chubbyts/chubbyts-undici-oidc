@@ -33,7 +33,7 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.0.0-beta.6S
+npm i @chubbyts/chubbyts-undici-oidc@^1.0.0-beta.6
 ```
 
 ## Usage

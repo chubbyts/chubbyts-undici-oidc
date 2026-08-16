@@ -60,7 +60,11 @@ test('without token, with realm', async () => {
   expect(handlerMocks).toHaveLength(0);
 });
 
-test('without token, with realm containing double quotes', async () => {
+test.each<{ name: string; realm: string; expectedChallenge: string }>([
+  { name: 'double quotes', realm: 'my "api"', expectedChallenge: `Bearer realm="my 'api'"` },
+  { name: 'backslashes', realm: 'my\\api\\', expectedChallenge: 'Bearer realm="myapi"' },
+  { name: 'control characters', realm: 'my\r\napi\u0000\u007f', expectedChallenge: 'Bearer realm="myapi"' },
+])('without token, with realm containing $name', async ({ realm, expectedChallenge }) => {
   const serverRequest = new ServerRequest('https://api.example.com/resource');
 
   const [tokenExtractor, tokenExtractorMocks] = useFunctionMock<TokenExtractor>([
@@ -71,14 +75,14 @@ test('without token, with realm containing double quotes', async () => {
 
   const [handler, handlerMocks] = useFunctionMock<Handler>([]);
 
-  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'my "api"');
+  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, realm);
 
   const response = await middleware(serverRequest, handler);
 
   expect(response.status).toBe(401);
   expect(response.statusText).toBe('Unauthorized');
   expect(Object.fromEntries(response.headers.entries())).toEqual({
-    'www-authenticate': `Bearer realm="my 'api'"`,
+    'www-authenticate': expectedChallenge,
   });
 
   expect(tokenExtractorMocks).toHaveLength(0);

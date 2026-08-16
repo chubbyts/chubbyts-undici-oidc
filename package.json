@@ -1,7 +1,7 @@
 {
   "name": "@chubbyts/chubbyts-undici-oidc",
   "type": "module",
-  "version": "1.0.0-beta.2",
+  "version": "1.0.0-beta.3",
   "description": "A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server.",
   "keywords": [],
   "author": "Dominik Zogg",

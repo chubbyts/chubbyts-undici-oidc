@@ -522,6 +522,46 @@ test('verify token with unknown key id', async () => {
   expect(fetchMocks).toHaveLength(0);
 });
 
+test('verify token without key id against jwks with multiple matching keys', async () => {
+  const { privateKey, jwks } = await createKeyAndJwks();
+  const { jwks: otherJwks } = await createKeyAndJwks();
+
+  const token = await new SignJWT({ scope: 'openid' })
+    .setProtectedHeader({ alg: 'RS256' })
+    .setSubject('subject-1')
+    .setIssuer(issuer)
+    .setAudience('audience-1')
+    .setExpirationTime(Math.floor(Date.now() / 1000) + 300)
+    .sign(privateKey);
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async () =>
+        createJwksResponse({
+          keys: [
+            ...(jwks as { keys: Array<unknown> }).keys,
+            ...(otherJwks as { keys: Array<{ kid: string }> }).keys.map((key) => ({ ...key, kid: 'key-2' })),
+          ],
+        }),
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, { audience: 'audience-1', fetch });
+
+  await expectInvalidTokenError(
+    tokenVerifier(token),
+    'multiple matching keys found in the JSON Web Key Set',
+    errors.JWKSMultipleMatchingKeys,
+  );
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
 test('verify token with invalid signature', async () => {
   const { jwks } = await createKeyAndJwks();
   const { privateKey: otherPrivateKey } = await createKeyAndJwks();

@@ -21,13 +21,9 @@ const stripTrailingSlashes = (value: string): string => {
   return value.endsWith('/') ? stripTrailingSlashes(value.slice(0, -1)) : value;
 };
 
-const isHttpsUrl = (value: unknown): boolean => {
-  try {
-    return new URL(String(value)).protocol === 'https:';
-  } catch {
-    return false;
-  }
-};
+const isAbsoluteUrl = (value: unknown): boolean => URL.canParse(String(value));
+
+const isHttpsUrl = (value: string): boolean => new URL(value).protocol === 'https:';
 
 const isTimeoutError = (error: unknown): boolean => {
   return error instanceof Error && error.name === 'TimeoutError';
@@ -38,6 +34,10 @@ export const createOidcConfigurationResolver = (
   options: OidcConfigurationResolverOptions = {},
 ): OidcConfigurationResolver => {
   const { fetch = globalThis.fetch, maxAge = 3600, timeout = 5, cooldown = 30 } = options;
+
+  if (!isAbsoluteUrl(issuer)) {
+    throw new Error(`Invalid issuer "${issuer}": must be an absolute url`);
+  }
 
   const url = `${stripTrailingSlashes(issuer)}/.well-known/openid-configuration`;
 
@@ -67,6 +67,11 @@ export const createOidcConfigurationResolver = (
 
     if (configuration.issuer !== issuer) {
       throw new Error(`Issuer mismatch: expected "${issuer}", given "${configuration.issuer}"`);
+    }
+
+    // fail here with a clear message instead of an obscure error on the first token verification
+    if (!isAbsoluteUrl(configuration.jwks_uri)) {
+      throw new Error(`Missing or invalid jwks_uri "${String(configuration.jwks_uri)}" for issuer "${issuer}"`);
     }
 
     // a https issuer must not downgrade its keys to plain http (mitm on the jwks fetch means forged tokens)

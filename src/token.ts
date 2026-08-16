@@ -36,6 +36,9 @@ const isTokenError = (error: unknown): error is errors.JOSEError => {
     error instanceof errors.JOSEAlgNotAllowed ||
     error instanceof errors.JOSENotSupported ||
     error instanceof errors.JWKSNoMatchingKey ||
+    // ambiguous key selection (e.g. token without "kid" against a jwks with multiple keys of the same alg): the token
+    // cannot be verified, treat it like a token without a matching key instead of an internal error
+    error instanceof errors.JWKSMultipleMatchingKeys ||
     error instanceof errors.JWSSignatureVerificationFailed
   );
 };

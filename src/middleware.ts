@@ -13,8 +13,15 @@ export type OidcAttributes = {
   };
 };
 
+// quoted-string (rfc 7230): a backslash escapes the next char and control chars are not allowed at all (crlf would
+// even make the header construction throw), so drop them and downgrade double quotes to single quotes
+const sanitizeChallengeValue = (value: string): string => {
+  // oxlint-disable-next-line no-control-regex
+  return value.replaceAll(/[\\\u0000-\u001f\u007f]/g, '').replaceAll('"', "'");
+};
+
 const formatChallengeParameter = ([key, value]: [string, string]): string => {
-  return ` ${key}="${value.replaceAll('"', "'")}"`;
+  return ` ${key}="${sanitizeChallengeValue(value)}"`;
 };
 
 const createChallenge = (realm: string | undefined, parameters: Record<string, string>): string => {

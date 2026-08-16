@@ -19,7 +19,7 @@
 
 ## Description
 
-A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server. It resolves the openid configuration of the given issuer, verifies JWT based bearer tokens against the issuer's JWKS and passes the verified claims to the handler via request attributes.
+A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server: resolves the issuer's [openid configuration][10], verifies JWT bearer tokens against its [JWKS][11] and passes the verified claims to the handler via request attributes.
 
 ## Requirements
 
@@ -33,14 +33,14 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.0.0-beta.3
+npm i @chubbyts/chubbyts-undici-oidc@^1.0.0-beta.4
 ```
 
 ## Usage
 
 ```ts
-import type { OidcAttributes } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
 import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
+import type { OidcAttributes } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
 import { createOidcAuthenticationMiddleware } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
 import { createBearerTokenExtractor, createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
 import type { Handler, ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
@@ -54,117 +54,60 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
   'api',
 );
 
-// register the middleware for the routes (or route group) you want to protect, public routes simply don't get it,
-// e.g. within chubbyts-framework: createGroup({ path: '/api', ..., middlewares: [oidcAuthenticationMiddleware, ...] })
+// add the middleware to the routes you want to protect, e.g. within chubbyts-framework:
+// createGroup({ path: '/api', ..., middlewares: [oidcAuthenticationMiddleware, ...] })
 
 const handler: Handler = async (serverRequest: ServerRequest<OidcAttributes>): Promise<Response> => {
-  const { oidc } = serverRequest.attributes; // { token: string, claims: JWTPayload } | undefined
+  const { oidc } = serverRequest.attributes; // { token: string, claims: JWTPayload }
 
-  return new Response(JSON.stringify({ sub: oidc?.claims.sub }), { headers: { 'content-type': 'application/json' } });
+  return new Response(JSON.stringify({ sub: oidc.claims.sub }), { headers: { 'content-type': 'application/json' } });
 };
 ```
 
-If the request does not contain a valid bearer token, the middleware returns a `401` response with a `WWW-Authenticate` challenge and the handler does not get called:
+ * **Audience:** `audience` is required and must match the `aud` claim your authorization server puts into access tokens for your API, otherwise any token of the issuer (even for other APIs, or ID tokens) would be accepted. If your server issues [RFC 9068][12] access tokens (`typ: at+jwt` header), pass `typ: 'at+jwt'` too.
+ * **Rejected requests:** Without a valid token the handler is not called and a `401` with a [RFC 6750][13] challenge is returned: `WWW-Authenticate: Bearer realm="api"` (missing token) or `Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"` (invalid token). The actual reason (expired, wrong signature, ...) is only logged (level `info`) via the optional logger, never sent to the client. Errors not related to the token (unreachable issuer, ...) are rethrown, so your error handling responds with a `5xx`.
+ * **Browser clients:** Allow the `Authorization` request header and expose the `WWW-Authenticate` response header within your cors configuration.
 
- * missing token: `WWW-Authenticate: Bearer realm="api"`
- * invalid token: `WWW-Authenticate: Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"`
-
-The challenge allows a client to distinguish a missing from an invalid token, but never contains the actual verification error (expired, wrong signature, ... it may also leak internal details like the issuer or jwks uri); the reason gets logged with level `info` via the optional logger instead. Errors which are not related to the token itself (unreachable discovery / jwks endpoint, ...) get rethrown, so your error handling (e.g. an error middleware) can log them and respond with a `5xx` status. On success the handler receives a request with the `oidc` attribute: `{ token: string, claims: JWTPayload }` (see the exported `OidcAttributes` type).
-
-**Audience:** The `audience` option is required and must match the audience (`aud` claim) your authorization server assigns to access tokens meant for your API. Otherwise any valid token of the issuer would get accepted, even ones issued for other APIs (or ID tokens). If your authorization server issues [RFC 9068][10] compliant access tokens (`typ: at+jwt` header), pass `typ: 'at+jwt'` as well, so ID tokens with a matching audience get rejected too.
-
-**Browser based clients:** Allow the `Authorization` request header within your cors configuration (e.g. `allowHeaders`) and expose the `WWW-Authenticate` response header (e.g. `exposeHeaders`), if the frontend should be able to read the challenge.
-
-### discovery
-
-#### createOidcConfigurationResolver
-
-Resolves the openid configuration from `{issuer}/.well-known/openid-configuration`, validates the issuer and caches the result.
+### Options
 
 ```ts
 import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
+import { createOidcAuthenticationMiddleware } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
+import { createBearerTokenExtractor, createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
 
+// resolves and caches {issuer}/.well-known/openid-configuration, lazily on first token verification
 const oidcConfigurationResolver = createOidcConfigurationResolver('https://issuer.example.com', {
   fetch, // custom fetch for the discovery request, default: globalThis.fetch
-  maxAge: 3600, // seconds a resolved configuration gets cached, default: 3600
-  timeout: 5, // seconds until the discovery request gets aborted, default: 5
-  cooldown: 30, // seconds a failed resolution gets cached (fail fast during an outage), default: 30
+  maxAge: 3600, // seconds a resolved configuration is cached, default: 3600
+  timeout: 5, // seconds until the discovery request is aborted, default: 5
+  cooldown: 30, // seconds a failed resolution is cached (fail fast during an outage), default: 30
 });
-```
 
-Things to be aware of:
-
- * **Lazy:** The configuration gets resolved on first use (first token verification), not on creation. Your application boots even if the issuer is not reachable yet, but requests during that time fail with the rethrown error (see the middleware).
- * **Outages:** Concurrent requests share one in-flight discovery request. A failed resolution (unreachable, timeout, non `2xx`, issuer mismatch, ...) gets cached for `cooldown` seconds, requests within that time fail immediately with the same error instead of hitting the issuer again. Set `cooldown: 0` to retry with every request.
- * **Issuer:** Pass the issuer exactly as the provider reports it within its configuration (`iss` claim), the comparison is strict, e.g. `https://issuer.example.com` and `https://issuer.example.com/` are not the same.
- * **Trust:** The `jwks_uri` gets used as published by the issuer, which is the usual OIDC trust model: whoever controls the discovery document controls the keys. Use a `https` issuer in production (an `https` issuer publishing a non `https` `jwks_uri` gets rejected), plain `http` is only meant for local development (see the keycloak section).
- * **fetch:** The optional `fetch` option allows a custom implementation (e.g. undici with a custom dispatcher / proxy or a mock in tests). It is only used for the discovery request, the jwks requests use the `fetch` option of `createJwtTokenVerifier` (jose applies its own 5 seconds timeout there).
-
-### token
-
-#### createBearerTokenExtractor
-
-Extracts the bearer token from the `Authorization` request header.
-
-```ts
-import { createBearerTokenExtractor } from '@chubbyts/chubbyts-undici-oidc/dist/token';
-
-const tokenExtractor = createBearerTokenExtractor();
-```
-
-#### createJwtTokenVerifier
-
-Verifies a JWT based token (signature via the issuer's JWKS, `iss`, `aud`, `exp` (required to be present), `nbf` and optionally the `typ` header, additional required claims and allowed algorithms) and returns its claims. Throws an `InvalidTokenError` (see `error`) if the token itself is invalid, any other error (e.g. discovery or jwks fetch failure) gets passed through.
-
-```ts
-import { createOidcConfigurationResolver } from '@chubbyts/chubbyts-undici-oidc/dist/discovery';
-import { createJwtTokenVerifier } from '@chubbyts/chubbyts-undici-oidc/dist/token';
-
-const tokenVerifier = createJwtTokenVerifier(createOidcConfigurationResolver('https://issuer.example.com'), {
-  audience: 'https://api.example.com', // string | Array<string>, required, see the audience section above
+// verifies signature (via the issuer's JWKS), "iss", "aud", "exp", "nbf" and returns the claims
+const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+  audience: 'https://api.example.com', // string | Array<string>, required
   algorithms: ['RS256'], // default: any asymmetric algorithm supported by jose
   clockTolerance: 5, // seconds, default: 0
-  typ: 'at+jwt', // expected "typ" header (RFC 9068 access tokens), default: not checked
-  requiredClaims: ['sub', 'iat', 'jti'], // additionally required claims, "iss", "aud" and "exp" are always required
+  typ: 'at+jwt', // expected "typ" header, default: not checked
+  requiredClaims: ['sub', 'iat', 'jti'], // additionally required claims, "iss", "aud" and "exp" always are
   fetch, // custom fetch for the jwks requests, default: globalThis.fetch
 });
-```
-
-The JWKS gets fetched via [jose][4]'s `createRemoteJWKSet` and is cached in memory, unknown key ids (e.g. after a key rotation) trigger a refetch (rate limited by jose). If the `jwks_uri` within the openid configuration changes, a new JWKS resolver gets created.
-
-### middleware
-
-#### createOidcAuthenticationMiddleware
-
-```ts
-import { createOidcAuthenticationMiddleware } from '@chubbyts/chubbyts-undici-oidc/dist/middleware';
 
 const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
-  tokenExtractor,
+  createBearerTokenExtractor(), // reads the "Authorization: Bearer <token>" header
   tokenVerifier,
-  'api', // realm, optional
-  logger, // optional
+  'api', // realm within the challenge, optional
+  logger, // @chubbyts/chubbyts-log-types compatible logger, optional, default: no-op
 );
 ```
 
- * `realm`: Optional, gets added to the `WWW-Authenticate` challenge as `realm="api"`, nothing else depends on it.
- * `logger`: Optional [@chubbyts/chubbyts-log-types][2] compatible logger (e.g. [@chubbyts/chubbyts-pino-adapter][8]), defaults to a no-op logger. Pass a real one to see *why* tokens got rejected (level `info`, including method and path), because this information intentionally does not get reflected to the client.
-
-### error
-
-#### InvalidTokenError
-
-Thrown by the token verifier if the token itself is invalid (malformed, wrong signature, expired, wrong issuer / audience, ...). Custom `TokenVerifier` implementations need to throw it to get the `401` response, any other error gets rethrown by the middleware.
-
-```ts
-import { InvalidTokenError } from '@chubbyts/chubbyts-undici-oidc/dist/error';
-
-throw new InvalidTokenError('token expired', cause);
-```
+ * **Issuer:** Must be exactly the `issuer` from the openid configuration (`iss` claim), `https://issuer.example.com` and `https://issuer.example.com/` are not the same. Use `https` in production, plain `http` is only meant for local development.
+ * **JWKS:** Fetched and cached in memory by [jose][4]'s `createRemoteJWKSet`, unknown key ids (key rotation) trigger a rate limited refetch.
+ * **Custom verifier:** A `TokenVerifier` is just `(token: string) => Promise<JWTPayload>`. Throw an `InvalidTokenError` (`@chubbyts/chubbyts-undici-oidc/dist/error`) to get the `401` response, any other error is rethrown.
 
 ## Testing against a local OIDC provider
 
-The easiest way to test the integration manually is [Keycloak][5] as a docker container:
+[Keycloak][5] as a docker container is the easiest way to test manually:
 
 ```sh
 docker run --rm -p 8080:8080 \
@@ -173,18 +116,9 @@ docker run --rm -p 8080:8080 \
   quay.io/keycloak/keycloak:26.7 start-dev
 ```
 
-Within the admin console at http://localhost:8080 (admin/admin):
-
- 1. Create a realm `test`.
- 2. Create a client `api` with *Client authentication* and the *Service accounts roles* flow enabled.
-
-For a reproducible setup (e.g. within docker compose) export the realm afterwards and let keycloak import it on startup: `start-dev --import-realm` with the exported json mounted at `/opt/keycloak/data/import`, see [chubbyts-petstore][9] for a complete example.
+Within the admin console at http://localhost:8080 (admin/admin) create a realm `test` and a client `api` with *Client authentication* and *Service accounts roles* enabled, then:
 
 ```sh
-# the openid configuration resolved by createOidcConfigurationResolver
-curl http://localhost:8080/realms/test/.well-known/openid-configuration
-
-# get a real access token
 curl -X POST http://localhost:8080/realms/test/protocol/openid-connect/token \
   -d grant_type=client_credentials -d client_id=api -d client_secret=<client-secret>
 ```
@@ -193,19 +127,13 @@ curl -X POST http://localhost:8080/realms/test/protocol/openid-connect/token \
 const oidcConfigurationResolver = createOidcConfigurationResolver('http://localhost:8080/realms/test');
 ```
 
-Things to be aware of:
+Keycloak specifics: access tokens contain `aud: "account"` until you add an *audience mapper*, have the header `typ: "JWT"` (not `at+jwt`) and the `iss` claim matches the URL the token was requested through, so use the same host for the resolver and the token request (or pin it, e.g. `KC_HOSTNAME=http://keycloak:8080` in docker compose). See [chubbyts-petstore][9] for a complete docker compose setup with an imported realm.
 
- * **Audience:** Keycloak access tokens contain `aud: "account"` by default, so verification fails with `unexpected "aud" claim value` until you add an *audience mapper* to the client scope.
- * **Typ:** By default Keycloak access tokens have the header `typ: "JWT"` (not `at+jwt`), so only pass the `typ` option if you configured Keycloak to issue RFC 9068 compliant access tokens.
- * **Issuer:** By default the `iss` claim matches the URL the token was requested through. Use the same host for the resolver and the token request (do not mix `localhost` and `127.0.0.1`), otherwise the issuer validation fails. As soon as tokens get requested from different hosts (e.g. docker compose: the api resolves the configuration via `http://keycloak:8080`, tokens get requested from the host via `http://localhost:8080`), fix the hostname instead: `KC_HOSTNAME=http://keycloak:8080` makes the issuer always `http://keycloak:8080/realms/test` (requests via other hostnames get redirected) and an entry `127.0.0.1 keycloak` in `/etc/hosts` makes it reachable from the host as well.
-
-For automated integration tests (e.g. within CI) [mock-oauth2-server][6] (`ghcr.io/navikt/mock-oauth2-server`) is a lightweight alternative which issues tokens for any client without any setup. This repository ships such an integration test suite:
+For automated tests [mock-oauth2-server][6] is a lightweight alternative which issues tokens without any setup. This repository's integration tests start it via [testcontainers][7] (docker compatible daemon required, set `MOCK_OAUTH2_SERVER_URL` to reuse a running one):
 
 ```sh
 pnpm test:integration --run
 ```
-
-It starts the mock-oauth2-server container via [testcontainers][7] on a random port (and stops it afterwards), fetches real tokens through the `client_credentials` grant and runs them through the whole middleware stack. A docker compatible daemon (docker, podman, colima, ...) needs to be running. If a server is already running (or reachable elsewhere), it gets reused instead: set `MOCK_OAUTH2_SERVER_URL` (default: `http://localhost:8080`) to point at it.
 
 ## Copyright
 
@@ -218,6 +146,8 @@ It starts the mock-oauth2-server container via [testcontainers][7] on a random p
 [5]: https://www.keycloak.org
 [6]: https://github.com/navikt/mock-oauth2-server
 [7]: https://www.npmjs.com/package/testcontainers
-[8]: https://www.npmjs.com/package/@chubbyts/chubbyts-pino-adapter
 [9]: https://github.com/chubbyts/chubbyts-petstore
-[10]: https://www.rfc-editor.org/rfc/rfc9068
+[10]: https://openid.net/specs/openid-connect-discovery-1_0.html
+[11]: https://www.rfc-editor.org/rfc/rfc7517
+[12]: https://www.rfc-editor.org/rfc/rfc9068
+[13]: https://www.rfc-editor.org/rfc/rfc6750

@@ -1,5 +1,5 @@
 import type { KeyObject } from 'node:crypto';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { CompactSign, SignJWT, errors, exportJWK, generateKeyPair } from 'jose';
 import { useFunctionMock } from '@chubbyts/chubbyts-function-mock/dist/function-mock';
 import { ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
@@ -38,12 +38,12 @@ const configuration: OidcConfiguration = {
   jwks_uri: jwksUri,
 };
 
-const createKeyAndJwks = async (): Promise<{ privateKey: KeyObject; jwks: unknown }> => {
+const createKeyAndJwks = async (kid = 'key-1'): Promise<{ privateKey: KeyObject; jwks: unknown }> => {
   const { publicKey, privateKey } = await generateKeyPair('RS256');
 
   const jwk = await exportJWK(publicKey);
 
-  return { privateKey, jwks: { keys: [{ ...jwk, kid: 'key-1', alg: 'RS256', use: 'sig' }] } };
+  return { privateKey, jwks: { keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] } };
 };
 
 const createToken = async (
@@ -132,6 +132,32 @@ test('verify token', async () => {
   expect(await tokenVerifier(token)).toEqual(
     expect.objectContaining({ iss: issuer, aud: 'audience-1', sub: 'subject-1', scope: 'openid' }),
   );
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test('verify token with audience array', async () => {
+  const { privateKey, jwks } = await createKeyAndJwks();
+
+  const token = await createToken(privateKey);
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async () => createJwksResponse(jwks),
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+    audience: ['audience-2', 'audience-1'],
+    fetch,
+  });
+
+  expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ aud: 'audience-1', sub: 'subject-1' }));
 
   expect(oidcConfigurationResolverMocks).toHaveLength(0);
   expect(fetchMocks).toHaveLength(0);
@@ -680,4 +706,343 @@ test('verify token with failing jwks uri', async () => {
 
   expect(oidcConfigurationResolverMocks).toHaveLength(0);
   expect(fetchMocks).toHaveLength(0);
+});
+
+test('verify token with jwks timeout', async () => {
+  const { privateKey } = await createKeyAndJwks();
+
+  const token = await createToken(privateKey);
+
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+    { parameters: [], return: Promise.resolve(configuration) },
+  ]);
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    {
+      callback: async (_input, init) => {
+        const signal = init?.signal as AbortSignal;
+
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason as Error));
+        });
+      },
+    },
+  ]);
+
+  const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+    audience: 'audience-1',
+    fetch,
+    jwksTimeout: 0.05,
+  });
+
+  const start = performance.now();
+
+  const error: unknown = await tokenVerifier(token).then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+
+  const duration = performance.now() - start;
+
+  expect(error).not.toBeInstanceOf(InvalidTokenError);
+  expect(error).toBeInstanceOf(errors.JWKSTimeout);
+
+  // 0.05s, not 50s (or 0.00005s): the timeout is given in seconds
+  expect(duration).toBeGreaterThanOrEqual(40);
+  expect(duration).toBeLessThan(1000);
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test('verify token with unreachable jwks uri within cooldown', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const { privateKey, jwks } = await createKeyAndJwks();
+
+    const token = await createToken(privateKey);
+
+    const error = new TypeError('fetch failed');
+
+    const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+    ]);
+
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      {
+        callback: async () => Promise.reject(error),
+      },
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+    ]);
+
+    const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      fetch,
+      jwksCooldown: 10,
+    });
+
+    await expect(tokenVerifier(token)).rejects.toBe(error);
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(9999);
+
+    // within cooldown, no jwks known: fail fast with the same error, no fetch
+    await expect(tokenVerifier(token)).rejects.toBe(error);
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(1);
+
+    // after cooldown: fetch again
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(0);
+
+    expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('verify token with expired jwks cache and failed refresh', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const { privateKey, jwks } = await createKeyAndJwks();
+    const { privateKey: otherPrivateKey, jwks: otherJwks } = await createKeyAndJwks('key-2');
+
+    const token = await createToken(privateKey);
+    const otherToken = await createToken(otherPrivateKey, { kid: 'key-2' });
+
+    const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+    ]);
+
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+      {
+        callback: async () => new Response('Internal Server Error', { status: 500 }),
+      },
+      {
+        callback: async () => createJwksResponse(otherJwks),
+      },
+    ]);
+
+    const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      fetch,
+      jwksMaxAge: 10,
+      jwksCooldown: 10,
+    });
+
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(2);
+
+    vi.advanceTimersByTime(9999);
+
+    // fresh cache: no fetch
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(2);
+
+    vi.advanceTimersByTime(1);
+
+    // expired cache, failed refresh: verify against the stale jwks instead of failing
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(9999);
+
+    // within cooldown: still stale, no fetch
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(1);
+
+    // after cooldown: fetch again, success replaces the stale jwks
+    expect(await tokenVerifier(otherToken)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(0);
+
+    expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('verify token with rotated key', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const { privateKey, jwks } = await createKeyAndJwks();
+    const { privateKey: otherPrivateKey, jwks: otherJwks } = await createKeyAndJwks('key-2');
+
+    const token = await createToken(privateKey);
+    const otherToken = await createToken(otherPrivateKey, { kid: 'key-2' });
+
+    const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+    ]);
+
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+      {
+        callback: async () => createJwksResponse(otherJwks),
+      },
+    ]);
+
+    const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      fetch,
+      jwksCooldown: 10,
+    });
+
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(9999);
+
+    // unknown key id within cooldown: no refetch (rate limit)
+    await expectInvalidTokenError(
+      tokenVerifier(otherToken),
+      'no applicable key found in the JSON Web Key Set',
+      errors.JWKSNoMatchingKey,
+    );
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(1);
+
+    // unknown key id after cooldown: refetch
+    expect(await tokenVerifier(otherToken)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(0);
+
+    expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('verify token with unknown key id and failed jwks refresh', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const { privateKey, jwks } = await createKeyAndJwks();
+    const { privateKey: otherPrivateKey } = await createKeyAndJwks('key-2');
+
+    const token = await createToken(privateKey);
+    const otherToken = await createToken(otherPrivateKey, { kid: 'key-2' });
+
+    const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+    ]);
+
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+      {
+        callback: async () => Promise.reject(new TypeError('fetch failed')),
+      },
+    ]);
+
+    const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      fetch,
+      jwksCooldown: 10,
+    });
+
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(10000);
+
+    // unknown key id, failed refetch: the token cannot be verified against the stale jwks
+    await expectInvalidTokenError(
+      tokenVerifier(otherToken),
+      'no applicable key found in the JSON Web Key Set',
+      errors.JWKSNoMatchingKey,
+    );
+    expect(fetchMocks).toHaveLength(0);
+
+    // within cooldown: known keys keep working, no fetch
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(0);
+
+    expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('verify token with unknown key id does not trigger the failure cooldown', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const { privateKey, jwks } = await createKeyAndJwks();
+    const { privateKey: otherPrivateKey } = await createKeyAndJwks('key-2');
+
+    const token = await createToken(privateKey);
+    const otherToken = await createToken(otherPrivateKey, { kid: 'key-2' });
+
+    const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+    ]);
+
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+    ]);
+
+    const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      fetch,
+      jwksMaxAge: 5,
+      jwksCooldown: 10,
+    });
+
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(2);
+
+    vi.advanceTimersByTime(5000);
+
+    // expired cache, successful refetch, but still no matching key: a token error, not an outage
+    await expectInvalidTokenError(
+      tokenVerifier(otherToken),
+      'no applicable key found in the JSON Web Key Set',
+      errors.JWKSNoMatchingKey,
+    );
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(5000);
+
+    // expired cache: refetch (no failure cooldown got triggered by the token error)
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(0);
+
+    expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });

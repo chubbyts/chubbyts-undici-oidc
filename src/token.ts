@@ -1,5 +1,5 @@
-import type { JWTPayload } from 'jose';
-import { createRemoteJWKSet, customFetch, errors, jwtVerify } from 'jose';
+import type { CryptoKey, FlattenedJWSInput, JWSHeaderParameters, JWTPayload, JWTVerifyGetKey } from 'jose';
+import { createLocalJWKSet, createRemoteJWKSet, customFetch, errors, jwtVerify } from 'jose';
 import type { ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 import type { OidcConfigurationResolver } from './discovery.js';
 import { InvalidTokenError } from './error.js';
@@ -23,9 +23,10 @@ export type JwtTokenVerifierOptions = {
   typ?: string;
   requiredClaims?: Array<string>;
   fetch?: typeof globalThis.fetch;
+  jwksMaxAge?: number;
+  jwksTimeout?: number;
+  jwksCooldown?: number;
 };
-
-type JwkSetResolver = ReturnType<typeof createRemoteJWKSet>;
 
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== '';
 
@@ -63,17 +64,64 @@ export const createJwtTokenVerifier = (
   // otherwise a token without expiration would be valid forever
   const requiredClaims = ['exp', ...(options.requiredClaims ?? [])];
 
-  // oxlint-disable-next-line functional/no-let
-  let cache: { jwksUri: string; jwkSetResolver: JwkSetResolver } | undefined;
+  const { jwksMaxAge = 600, jwksTimeout = 5, jwksCooldown = 30 } = options;
 
-  const resolveJwkSet = (jwksUri: string): JwkSetResolver => {
+  const createJwkSetResolver = (jwksUri: string): JWTVerifyGetKey => {
+    const remoteJwkSet = createRemoteJWKSet(new URL(jwksUri), {
+      ...(options.fetch ? { [customFetch]: options.fetch } : {}),
+      cacheMaxAge: jwksMaxAge * 1000,
+      timeoutDuration: jwksTimeout * 1000,
+      cooldownDuration: jwksCooldown * 1000,
+    });
+
+    // oxlint-disable-next-line functional/no-let
+    let failure: { error: unknown; retryAfter: number } | undefined;
+
+    // a jwks outage should not take the resource server down: jose does not serve a stale jwks once its cache expired,
+    // so verify against the last known keys (if there ever were any) instead of failing
+    const resolveStaleKey = async (
+      protectedHeader: JWSHeaderParameters,
+      token: FlattenedJWSInput,
+      error: unknown,
+    ): Promise<CryptoKey> => {
+      const jwks = remoteJwkSet.jwks();
+
+      if (jwks) {
+        return createLocalJWKSet(jwks)(protectedHeader, token);
+      }
+
+      throw error;
+    };
+
+    return async (protectedHeader: JWSHeaderParameters, token: FlattenedJWSInput): Promise<CryptoKey> => {
+      // fail fast (or serve stale) during an outage instead of hitting the jwks uri with every request
+      if (failure && failure.retryAfter > Date.now()) {
+        return resolveStaleKey(protectedHeader, token, failure.error);
+      }
+
+      try {
+        return await remoteJwkSet(protectedHeader, token);
+      } catch (error) {
+        if (isTokenError(error)) {
+          throw error;
+        }
+
+        failure = { error, retryAfter: Date.now() + jwksCooldown * 1000 };
+
+        return resolveStaleKey(protectedHeader, token, error);
+      }
+    };
+  };
+
+  // oxlint-disable-next-line functional/no-let
+  let cache: { jwksUri: string; jwkSetResolver: JWTVerifyGetKey } | undefined;
+
+  const resolveJwkSet = (jwksUri: string): JWTVerifyGetKey => {
     if (cache?.jwksUri === jwksUri) {
       return cache.jwkSetResolver;
     }
 
-    const jwkSetResolver = options.fetch
-      ? createRemoteJWKSet(new URL(jwksUri), { [customFetch]: options.fetch })
-      : createRemoteJWKSet(new URL(jwksUri));
+    const jwkSetResolver = createJwkSetResolver(jwksUri);
 
     // oxlint-disable-next-line functional/immutable-data
     cache = { jwksUri, jwkSetResolver };

@@ -33,7 +33,7 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.0.0-beta.4
+npm i @chubbyts/chubbyts-undici-oidc@^1.0.0-beta.5
 ```
 
 ## Usage
@@ -58,9 +58,10 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
 // createGroup({ path: '/api', ..., middlewares: [oidcAuthenticationMiddleware, ...] })
 
 const handler: Handler = async (serverRequest: ServerRequest<OidcAttributes>): Promise<Response> => {
-  const { oidc } = serverRequest.attributes; // { token: string, claims: JWTPayload }
+  // attributes are typed as partial, the middleware guarantees "oidc" for every handler behind it
+  const { claims } = serverRequest.attributes.oidc!; // { token: string, claims: JWTPayload }
 
-  return new Response(JSON.stringify({ sub: oidc.claims.sub }), { headers: { 'content-type': 'application/json' } });
+  return new Response(JSON.stringify({ sub: claims.sub }), { headers: { 'content-type': 'application/json' } });
 };
 ```
 
@@ -91,6 +92,9 @@ const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
   typ: 'at+jwt', // expected "typ" header, default: not checked
   requiredClaims: ['sub', 'iat', 'jti'], // additionally required claims, "iss", "aud" and "exp" always are
   fetch, // custom fetch for the jwks requests, default: globalThis.fetch
+  jwksMaxAge: 600, // seconds a fetched jwks is cached, default: 600
+  jwksTimeout: 5, // seconds until a jwks request is aborted, default: 5
+  jwksCooldown: 30, // seconds until a failed jwks (re)fetch is retried, and between refetches for unknown key ids, default: 30
 });
 
 const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
@@ -102,8 +106,8 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
 ```
 
  * **Issuer:** Must be exactly the `issuer` from the openid configuration (`iss` claim), `https://issuer.example.com` and `https://issuer.example.com/` are not the same. Use `https` in production, plain `http` is only meant for local development.
- * **Outages:** If the issuer is unreachable while the cached configuration is expired, the last known configuration keeps being served (and a refetch is retried after `cooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful resolution the error is thrown (`5xx`).
- * **JWKS:** Fetched and cached in memory by [jose][4]'s `createRemoteJWKSet`, unknown key ids (key rotation) trigger a rate limited refetch.
+ * **JWKS:** Fetched from the `jwks_uri` of the openid configuration and cached in memory for `jwksMaxAge`, an unknown key id (key rotation) triggers a refetch, but at most once per `jwksCooldown`.
+ * **Outages:** If the issuer is unreachable while the cached configuration or jwks is expired, the last known one keeps being used (a refetch is retried after `cooldown` / `jwksCooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful fetch the error is thrown (`5xx`), within the cooldown immediately without hitting the issuer again.
  * **Custom verifier:** A `TokenVerifier` is just `(token: string) => Promise<JWTPayload>`. Throw an `InvalidTokenError` (`@chubbyts/chubbyts-undici-oidc/dist/error`) to get the `401` response, any other error is rethrown.
 
 ## Testing against a local OIDC provider

@@ -266,3 +266,41 @@ test('with valid token', async () => {
   expect(tokenVerifierMocks).toHaveLength(0);
   expect(handlerMocks).toHaveLength(0);
 });
+
+test('with valid token and handler throwing invalid token error', async () => {
+  const serverRequest = new ServerRequest('https://api.example.com/resource', {
+    headers: { authorization: 'Bearer token-1' },
+  });
+
+  const claims = { iss: 'https://issuer.example.com', sub: 'subject-1' };
+
+  // an InvalidTokenError thrown behind the middleware is not a verification failure and must not become a 401
+  const error = new InvalidTokenError('thrown by the handler');
+
+  const [tokenExtractor, tokenExtractorMocks] = useFunctionMock<TokenExtractor>([
+    { parameters: [serverRequest], return: 'token-1' },
+  ]);
+
+  const [tokenVerifier, tokenVerifierMocks] = useFunctionMock<TokenVerifier>([
+    { parameters: ['token-1'], return: Promise.resolve(claims) },
+  ]);
+
+  const [handler, handlerMocks] = useFunctionMock<Handler>([
+    {
+      callback: async (): Promise<Response> => {
+        throw error;
+      },
+    },
+  ]);
+
+  const [logger, loggerMocks] = useObjectMock<Logger>([]);
+
+  const middleware = createOidcAuthenticationMiddleware(tokenExtractor, tokenVerifier, 'api', logger);
+
+  await expect(middleware(serverRequest, handler)).rejects.toBe(error);
+
+  expect(tokenExtractorMocks).toHaveLength(0);
+  expect(tokenVerifierMocks).toHaveLength(0);
+  expect(handlerMocks).toHaveLength(0);
+  expect(loggerMocks).toHaveLength(0);
+});

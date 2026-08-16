@@ -53,12 +53,13 @@ export const createOidcAuthenticationMiddleware = (
       return createUnauthorizedResponse(createChallenge(realm, {}));
     }
 
-    try {
-      const claims = await tokenVerifier(token);
+    // oxlint-disable-next-line functional/no-let
+    let claims: JWTPayload;
 
-      return await handler(
-        new ServerRequest(request, { attributes: { ...request.attributes, oidc: { token, claims } } }),
-      );
+    // only the verification is guarded: an InvalidTokenError thrown by the handler (or a middleware behind it) is not
+    // this middleware's business and gets rethrown like any other handler error
+    try {
+      claims = await tokenVerifier(token);
     } catch (error) {
       if (!(error instanceof InvalidTokenError)) {
         throw error;
@@ -78,5 +79,7 @@ export const createOidcAuthenticationMiddleware = (
         }),
       );
     }
+
+    return handler(new ServerRequest(request, { attributes: { ...request.attributes, oidc: { token, claims } } }));
   };
 };

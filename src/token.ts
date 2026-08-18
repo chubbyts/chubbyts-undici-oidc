@@ -1,8 +1,17 @@
-import type { CryptoKey, FlattenedJWSInput, JWSHeaderParameters, JWTPayload, JWTVerifyGetKey } from 'jose';
-import { createLocalJWKSet, createRemoteJWKSet, customFetch, errors, jwtVerify } from 'jose';
+import type {
+  CryptoKey,
+  ExportedJWKSCache,
+  FlattenedJWSInput,
+  JSONWebKeySet,
+  JWKSCacheInput,
+  JWSHeaderParameters,
+  JWTPayload,
+  JWTVerifyGetKey,
+} from 'jose';
+import { createLocalJWKSet, createRemoteJWKSet, customFetch, errors, jwksCache, jwtVerify } from 'jose';
 import type { ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 import type { OidcConfigurationResolver } from './discovery.js';
-import { InvalidTokenError } from './error.js';
+import { InvalidTokenError, JwksError } from './error.js';
 
 export type TokenExtractor = (request: ServerRequest) => string | undefined;
 
@@ -26,13 +35,66 @@ export type JwtTokenVerifierOptions = {
   jwksMaxAge?: number;
   jwksTimeout?: number;
   jwksCooldown?: number;
+  jwksMaxStale?: number;
 };
+
+/**
+ * All asymmetric signature algorithms supported by jose. Symmetric algorithms (HS*) are not supported at all: a
+ * public (jwks) key must never be usable as a hmac secret (algorithm confusion).
+ */
+export const SUPPORTED_ALGORITHMS: ReadonlyArray<string> = [
+  'EdDSA',
+  'Ed25519',
+  'ES256',
+  'ES384',
+  'ES512',
+  'ML-DSA-44',
+  'ML-DSA-65',
+  'ML-DSA-87',
+  'PS256',
+  'PS384',
+  'PS512',
+  'RS256',
+  'RS384',
+  'RS512',
+];
 
 const isNonEmptyString = (value: unknown): value is string => typeof value === 'string' && value !== '';
 
 const isNonEmptyAudience = (value: unknown): value is string | Array<string> => {
   return isNonEmptyString(value) || (Array.isArray(value) && value.length > 0 && value.every(isNonEmptyString));
 };
+
+const quote = (values: ReadonlyArray<string>): string => values.map((value) => `"${value}"`).join(', ');
+
+const assertNonNegative = (name: string, value: number): void => {
+  if (Number.isNaN(value) || value < 0) {
+    throw new Error(`Invalid ${name} ${String(value)}: must be a non-negative number of seconds`);
+  }
+};
+
+const assertSupportedAlgorithms = (algorithms: unknown): void => {
+  if (algorithms === undefined) {
+    return;
+  }
+
+  // an empty array would silently reject every token
+  if (!Array.isArray(algorithms) || algorithms.length === 0) {
+    throw new Error('Invalid algorithms: must be a non-empty array of supported (asymmetric) algorithms');
+  }
+
+  const unsupportedAlgorithms = algorithms.filter((algorithm) => !SUPPORTED_ALGORITHMS.includes(algorithm as string));
+
+  if (unsupportedAlgorithms.length > 0) {
+    throw new Error(
+      `Unsupported algorithms ${quote(unsupportedAlgorithms.map(String))}, supported (asymmetric) algorithms are ${quote(
+        SUPPORTED_ALGORITHMS,
+      )}`,
+    );
+  }
+};
+
+const isFetchedJwksCache = (cache: JWKSCacheInput): cache is ExportedJWKSCache => typeof cache.uat === 'number';
 
 const isTokenError = (error: unknown): error is errors.JOSEError => {
   return (
@@ -60,37 +122,68 @@ export const createJwtTokenVerifier = (
     throw new Error('Invalid audience: must be a non-empty string or a non-empty array of non-empty strings');
   }
 
+  assertSupportedAlgorithms(options.algorithms);
+
   // "iss" and "aud" get required by jose through the issuer / audience options, "exp" needs to be required explicitly,
   // otherwise a token without expiration would be valid forever
   const requiredClaims = ['exp', ...(options.requiredClaims ?? [])];
 
-  const { jwksMaxAge = 600, jwksTimeout = 5, jwksCooldown = 30 } = options;
+  const {
+    clockTolerance = 0,
+    jwksMaxAge = 600,
+    jwksTimeout = 5,
+    jwksCooldown = 30,
+    jwksMaxStale = Number.POSITIVE_INFINITY,
+  } = options;
+
+  assertNonNegative('clockTolerance', clockTolerance);
+  assertNonNegative('jwksMaxAge', jwksMaxAge);
+  assertNonNegative('jwksTimeout', jwksTimeout);
+  assertNonNegative('jwksCooldown', jwksCooldown);
+  assertNonNegative('jwksMaxStale', jwksMaxStale);
 
   const createJwkSetResolver = (jwksUri: string): JWTVerifyGetKey => {
+    // jose stores each successfully fetched jwks together with its fetch time ("uat") in here
+    const fetchedJwksCache: JWKSCacheInput = {};
+
     const remoteJwkSet = createRemoteJWKSet(new URL(jwksUri), {
       ...(options.fetch ? { [customFetch]: options.fetch } : {}),
       cacheMaxAge: jwksMaxAge * 1000,
       timeoutDuration: jwksTimeout * 1000,
       cooldownDuration: jwksCooldown * 1000,
+      [jwksCache]: fetchedJwksCache,
     });
 
     // oxlint-disable-next-line functional/no-let
     let failure: { error: unknown; retryAfter: number } | undefined;
 
+    // oxlint-disable-next-line functional/no-let
+    let staleJwkSet: { jwks: JSONWebKeySet; resolve: ReturnType<typeof createLocalJWKSet> } | undefined;
+
     // a jwks outage should not take the resource server down: jose does not serve a stale jwks once its cache expired,
-    // so verify against the last known keys (if there ever were any) instead of failing
+    // so verify against the last known keys (if there ever were any) instead of failing, but only for jwksMaxStale
+    // after the cache expired: a key the issuer removed since (e.g. a compromised one) must not stay valid for as long
+    // as the outage lasts
     const resolveStaleKey = async (
       protectedHeader: JWSHeaderParameters,
       token: FlattenedJWSInput,
       error: unknown,
     ): Promise<CryptoKey> => {
-      const jwks = remoteJwkSet.jwks();
-
-      if (jwks) {
-        return createLocalJWKSet(jwks)(protectedHeader, token);
+      if (
+        !isFetchedJwksCache(fetchedJwksCache) ||
+        Date.now() >= fetchedJwksCache.uat + (jwksMaxAge + jwksMaxStale) * 1000
+      ) {
+        throw error;
       }
 
-      throw error;
+      const { jwks } = fetchedJwksCache;
+
+      // importing the keys is not for free, do it once per fetched jwks instead of once per verification
+      if (staleJwkSet?.jwks !== jwks) {
+        staleJwkSet = { jwks, resolve: createLocalJWKSet(jwks) };
+      }
+
+      return staleJwkSet.resolve(protectedHeader, token);
     };
 
     return async (protectedHeader: JWSHeaderParameters, token: FlattenedJWSInput): Promise<CryptoKey> => {
@@ -106,9 +199,13 @@ export const createJwtTokenVerifier = (
           throw error;
         }
 
-        failure = { error, retryAfter: Date.now() + jwksCooldown * 1000 };
+        // any other jose error is about the jwks itself (non 200 status, timeout, invalid json, malformed keys),
+        // errors of the fetch implementation (unreachable jwks uri, ...) are passed through as they are
+        const jwksError = error instanceof errors.JOSEError ? new JwksError(error.message, error) : error;
 
-        return resolveStaleKey(protectedHeader, token, error);
+        failure = { error: jwksError, retryAfter: Date.now() + jwksCooldown * 1000 };
+
+        return resolveStaleKey(protectedHeader, token, jwksError);
       }
     };
   };
@@ -137,7 +234,7 @@ export const createJwtTokenVerifier = (
         issuer: configuration.issuer,
         audience: options.audience,
         algorithms: options.algorithms,
-        clockTolerance: options.clockTolerance,
+        clockTolerance,
         typ: options.typ,
         requiredClaims,
       });

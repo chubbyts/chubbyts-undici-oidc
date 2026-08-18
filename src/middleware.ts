@@ -38,8 +38,6 @@ const createUnauthorizedResponse = (challenge: string): Response => {
   });
 };
 
-const resolvePathnameSearch = (url: URL): string => `${url.pathname}${url.search}`;
-
 export const createOidcAuthenticationMiddleware = (
   tokenExtractor: TokenExtractor,
   tokenVerifier: TokenVerifier,
@@ -67,7 +65,8 @@ export const createOidcAuthenticationMiddleware = (
 
       logger.info('Invalid token', {
         method: request.method,
-        pathnameSearch: resolvePathnameSearch(new URL(request.url)),
+        // the query string is left out on purpose: it may carry sensitive data (api keys, session ids, ...)
+        pathname: new URL(request.url).pathname,
         error: { name: error.name, message: error.message, cause: error.cause },
       });
 

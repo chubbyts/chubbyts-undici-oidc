@@ -33,7 +33,7 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.0.0
+npm i @chubbyts/chubbyts-undici-oidc@^1.1.0
 ```
 
 ## Usage
@@ -68,6 +68,7 @@ const handler: Handler = async (serverRequest: ServerRequest<OidcAttributes>): P
  * **Audience:** `audience` is required and must match the `aud` claim your authorization server puts into access tokens for your API, otherwise any token of the issuer (even for other APIs, or ID tokens) would be accepted. If your server issues [RFC 9068][12] access tokens (`typ: at+jwt` header), pass `typ: 'at+jwt'` too.
  * **Rejected requests:** Without a valid token the handler is not called and a `401` with a [RFC 6750][13] challenge is returned: `WWW-Authenticate: Bearer realm="api"` (missing token) or `Bearer realm="api", error="invalid_token", error_description="The access token is invalid or expired"` (invalid token). The actual reason (expired, wrong signature, ...) is only logged (level `info`) via the optional logger, never sent to the client. Errors not related to the token (unreachable issuer, ...) are rethrown, so your error handling responds with a `5xx`.
  * **Browser clients:** Allow the `Authorization` request header and expose the `WWW-Authenticate` response header within your cors configuration.
+ * **Token in the request attribute:** The `oidc` attribute carries the raw bearer token (`token`) next to the verified `claims`, so that handlers can forward it to downstream apis. Treat the attribute as sensitive: do not dump the request attributes into logs, error reports or responses.
 
 ### Options
 
@@ -79,22 +80,23 @@ import { createBearerTokenExtractor, createJwtTokenVerifier } from '@chubbyts/ch
 // resolves and caches {issuer}/.well-known/openid-configuration, lazily on first token verification
 const oidcConfigurationResolver = createOidcConfigurationResolver('https://issuer.example.com', {
   fetch, // custom fetch for the discovery request, default: globalThis.fetch
-  maxAge: 3600, // seconds a resolved configuration is cached, default: 3600
-  timeout: 5, // seconds until the discovery request is aborted, default: 5
-  cooldown: 30, // seconds until a failed (re)fetch is retried, default: 30
+  maxAge: 3600, // seconds a resolved configuration is cached (non-negative), default: 3600
+  timeout: 5, // seconds until the discovery request is aborted (non-negative), default: 5
+  cooldown: 30, // seconds until a failed (re)fetch is retried (non-negative), default: 30
 });
 
 // verifies signature (via the issuer's JWKS), "iss", "aud", "exp", "nbf" and returns the claims
 const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
   audience: 'https://api.example.com', // string | Array<string>, required (non-empty, enforced at runtime)
-  algorithms: ['RS256'], // default: any asymmetric algorithm supported by jose
-  clockTolerance: 5, // seconds, default: 0
+  algorithms: ['RS256'], // non-empty subset of SUPPORTED_ALGORITHMS, default: any asymmetric algorithm supported by jose
+  clockTolerance: 5, // seconds (non-negative), default: 0
   typ: 'at+jwt', // expected "typ" header, default: not checked
   requiredClaims: ['sub', 'iat', 'jti'], // additionally required claims, "iss", "aud" and "exp" always are
   fetch, // custom fetch for the jwks requests, default: globalThis.fetch
-  jwksMaxAge: 600, // seconds a fetched jwks is cached, default: 600
-  jwksTimeout: 5, // seconds until a jwks request is aborted, default: 5
-  jwksCooldown: 30, // seconds until a failed jwks (re)fetch is retried, and between refetches for unknown key ids, default: 30
+  jwksMaxAge: 600, // seconds a fetched jwks is cached (non-negative), default: 600
+  jwksTimeout: 5, // seconds until a jwks request is aborted (non-negative), default: 5
+  jwksCooldown: 30, // seconds until a failed jwks (re)fetch is retried, and between refetches for unknown key ids (non-negative), default: 30
+  jwksMaxStale: 3600, // seconds an expired jwks keeps being used while its refetch fails (non-negative, 0: never), default: Infinity
 });
 
 const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
@@ -105,9 +107,11 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
 );
 ```
 
- * **Issuer:** Must be exactly the `issuer` from the openid configuration (`iss` claim), `https://issuer.example.com` and `https://issuer.example.com/` are not the same. Use `https` in production, plain `http` is only meant for local development.
+ * **Issuer:** Must be exactly the `issuer` from the openid configuration (`iss` claim), `https://issuer.example.com` and `https://issuer.example.com/` are not the same. Only absolute `http(s)` urls are accepted. Use `https` in production, whoever can tamper with an unprotected discovery or jwks response can forge tokens your api accepts, plain `http` is only meant for local development. A `https` issuer advertising a plain `http` `jwks_uri` is rejected in any case, and neither the discovery nor the jwks request follows redirects (a `https` → `http` redirect would silently bypass these checks).
+ * **Algorithms:** Only asymmetric signature algorithms are supported (`SUPPORTED_ALGORITHMS` within `@chubbyts/chubbyts-undici-oidc/dist/token`: `EdDSA`, `Ed25519`, `ES256`, `ES384`, `ES512`, `ML-DSA-44`, `ML-DSA-65`, `ML-DSA-87`, `PS256`, `PS384`, `PS512`, `RS256`, `RS384`, `RS512`): a public (jwks) key must never be usable as a hmac secret (algorithm confusion). Anything else, including `HS*`, is rejected at construction time (`algorithms` option) or verification time (token header).
+ * **Options:** Invalid options (empty or unsupported `algorithms`, negative durations, empty `audience`) throw at construction time instead of silently rejecting every token.
  * **JWKS:** Fetched from the `jwks_uri` of the openid configuration and cached in memory for `jwksMaxAge`, an unknown key id (key rotation) triggers a refetch, but at most once per `jwksCooldown`.
- * **Outages:** If the issuer is unreachable while the cached configuration or jwks is expired, the last known one keeps being used (a refetch is retried after `cooldown` / `jwksCooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful fetch the error is thrown (`5xx`), within the cooldown immediately without hitting the issuer again.
+ * **Outages:** If the issuer is unreachable while the cached configuration or jwks is expired, the last known one keeps being used (a refetch is retried after `cooldown` / `jwksCooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful fetch the error is thrown (`5xx`), within the cooldown immediately without hitting the issuer again. Be aware that a stale jwks still contains keys the issuer removed in the meantime (e.g. a compromised one), so tokens signed with them stay valid for as long as the outage lasts: set `jwksMaxStale` to bound this window (after `jwksMaxAge + jwksMaxStale` since the last successful fetch, verification fails with the last jwks error until a refetch succeeds), `0` disables serving a stale jwks altogether. A failed or invalid discovery / jwks response is reported as `OidcConfigurationError` / `JwksError` (`@chubbyts/chubbyts-undici-oidc/dist/error`, with the original error as `cause`), errors of the fetch implementation itself (dns, connection refused, ...) are passed through as they are.
  * **Custom verifier:** A `TokenVerifier` is just `(token: string) => Promise<JWTPayload>`. Throw an `InvalidTokenError` (`@chubbyts/chubbyts-undici-oidc/dist/error`) to get the `401` response, any other error is rethrown.
 
 ## Testing against a local OIDC provider

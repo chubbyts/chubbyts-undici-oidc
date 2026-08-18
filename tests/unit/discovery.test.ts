@@ -2,6 +2,7 @@ import { expect, test, vi } from 'vitest';
 import { useFunctionMock } from '@chubbyts/chubbyts-function-mock/dist/function-mock';
 import type { OidcConfiguration } from '../../src/discovery';
 import { createOidcConfigurationResolver } from '../../src/discovery';
+import { OidcConfigurationError } from '../../src/error';
 
 const issuer = 'https://issuer.example.com';
 const url = 'https://issuer.example.com/.well-known/openid-configuration';
@@ -20,15 +21,49 @@ const createFetchMock = (
   callback: async (input, init) => {
     expect(String(input)).toBe(expectedUrl);
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(init?.redirect).toBe('manual');
 
     return typeof response === 'function' ? response() : response;
   },
 });
 
-test('create resolver with invalid issuer', () => {
-  expect(() => createOidcConfigurationResolver('issuer.example.com')).toThrow(
-    'Invalid issuer "issuer.example.com": must be an absolute url',
+const expectOidcConfigurationError = async (promise: Promise<unknown>, message: string): Promise<unknown> => {
+  const error: unknown = await promise.then(
+    () => undefined,
+    (e: unknown) => e,
   );
+
+  expect(error).toBeInstanceOf(OidcConfigurationError);
+  expect((error as OidcConfigurationError).name).toBe('OidcConfigurationError');
+  expect((error as OidcConfigurationError).message).toBe(message);
+
+  return (error as OidcConfigurationError).cause;
+};
+
+test.each<{ name: string; issuer: string }>([
+  { name: 'relative', issuer: 'issuer.example.com' },
+  { name: 'not a url', issuer: 'not a url' },
+  { name: 'non http scheme', issuer: 'ftp://issuer.example.com' },
+])('create resolver with invalid issuer: $name', ({ issuer: invalidIssuer }) => {
+  expect(() => createOidcConfigurationResolver(invalidIssuer)).toThrow(
+    `Invalid issuer "${invalidIssuer}": must be an absolute http(s) url`,
+  );
+});
+
+test.each<{ name: string; options: Record<string, number>; message: string }>([
+  { name: 'maxAge', options: { maxAge: -1 }, message: 'Invalid maxAge -1: must be a non-negative number of seconds' },
+  {
+    name: 'timeout',
+    options: { timeout: -0.5 },
+    message: 'Invalid timeout -0.5: must be a non-negative number of seconds',
+  },
+  {
+    name: 'cooldown',
+    options: { cooldown: Number.NaN },
+    message: 'Invalid cooldown NaN: must be a non-negative number of seconds',
+  },
+])('create resolver with invalid option: $name', ({ options, message }) => {
+  expect(() => createOidcConfigurationResolver(issuer, options)).toThrow(message);
 });
 
 test('resolve configuration', async () => {
@@ -155,15 +190,54 @@ test('resolve configuration without cache', async () => {
   expect(fetchMocks).toHaveLength(0);
 });
 
-test('resolve configuration with failed response', async () => {
-  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
-    createFetchMock(url, new Response(undefined, { status: 404 })),
-  ]);
+test.each<{ name: string; response: Response }>([
+  // a redirect is not followed (redirect: 'manual'): a https -> http redirect must not bypass the https checks
+  {
+    name: 'redirect',
+    response: Response.redirect('https://other-issuer.example.com/.well-known/openid-configuration'),
+  },
+  { name: 'client error', response: new Response(undefined, { status: 404 }) },
+  { name: 'server error', response: new Response(undefined, { status: 500 }) },
+])('resolve configuration with failed response: $name', async ({ response }) => {
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([createFetchMock(url, response)]);
 
   const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch });
 
-  await expect(oidcConfigurationResolver()).rejects.toThrow(
-    'Cannot fetch oidc configuration from "https://issuer.example.com/.well-known/openid-configuration": status 404',
+  await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
+    `Cannot fetch oidc configuration from "https://issuer.example.com/.well-known/openid-configuration": status ${response.status}`,
+  );
+
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test('resolve configuration with malformed json', async () => {
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([createFetchMock(url, new Response('{'))]);
+
+  const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch });
+
+  const cause = await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
+    'Cannot fetch oidc configuration from "https://issuer.example.com/.well-known/openid-configuration": invalid json',
+  );
+
+  expect(cause).toBeInstanceOf(SyntaxError);
+
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test.each<{ name: string; body: string }>([
+  { name: 'string', body: '"issuer"' },
+  { name: 'null', body: 'null' },
+  { name: 'array', body: '[]' },
+])('resolve configuration with non object json: $name', async ({ body }) => {
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([createFetchMock(url, new Response(body))]);
+
+  const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch });
+
+  await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
+    'Cannot fetch oidc configuration from "https://issuer.example.com/.well-known/openid-configuration": invalid json',
   );
 
   expect(fetchMocks).toHaveLength(0);
@@ -181,8 +255,37 @@ test('resolve configuration with issuer mismatch', async () => {
 
   const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch });
 
-  await expect(oidcConfigurationResolver()).rejects.toThrow(
+  await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
     'Issuer mismatch: expected "https://issuer.example.com", given "https://other-issuer.example.com"',
+  );
+
+  expect(fetchMocks).toHaveLength(0);
+});
+
+test.each<{ name: string; issuer: unknown; given: string }>([
+  { name: 'missing', issuer: undefined, given: 'undefined' },
+  { name: 'null', issuer: null, given: 'null' },
+  { name: 'number', issuer: 42, given: 'number' },
+])('resolve configuration with invalid issuer: $name', async ({ issuer: givenIssuer, given }) => {
+  const { issuer: _, ...configurationWithoutIssuer } = configuration;
+
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+    createFetchMock(
+      url,
+      new Response(
+        JSON.stringify(
+          givenIssuer === undefined ? configurationWithoutIssuer : { ...configuration, issuer: givenIssuer },
+        ),
+      ),
+    ),
+  ]);
+
+  const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch });
+
+  await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
+    `Issuer mismatch: expected "https://issuer.example.com", given "${given}"`,
   );
 
   expect(fetchMocks).toHaveLength(0);
@@ -208,7 +311,7 @@ test('resolve configuration with timeout', async () => {
     (e: unknown) => e,
   );
 
-  expect(error).toBeInstanceOf(Error);
+  expect(error).toBeInstanceOf(OidcConfigurationError);
   expect((error as Error).message).toBe(
     'Cannot fetch oidc configuration from "https://issuer.example.com/.well-known/openid-configuration": timeout after 0.01s',
   );
@@ -367,12 +470,58 @@ test('resolve configuration without failure cooldown', async () => {
   expect(fetchMocks).toHaveLength(0);
 });
 
-test.each<{ name: string; givenIssuer: string; jwks_uri: unknown }>([
-  { name: 'https issuer and invalid jwks_uri', givenIssuer: 'https://issuer.example.com', jwks_uri: 'not-a-url' },
-  { name: 'https issuer and missing jwks_uri', givenIssuer: 'https://issuer.example.com', jwks_uri: undefined },
-  { name: 'http issuer and invalid jwks_uri', givenIssuer: 'http://issuer.example.com', jwks_uri: 'not-a-url' },
-  { name: 'http issuer and missing jwks_uri', givenIssuer: 'http://issuer.example.com', jwks_uri: undefined },
-])('resolve configuration with $name', async ({ givenIssuer, jwks_uri }) => {
+test.each<{ name: string; givenIssuer: string; jwks_uri: unknown; given: string }>([
+  {
+    name: 'https issuer and invalid jwks_uri',
+    givenIssuer: 'https://issuer.example.com',
+    jwks_uri: 'not-a-url',
+    given: 'not-a-url',
+  },
+  {
+    name: 'https issuer and relative jwks_uri',
+    givenIssuer: 'https://issuer.example.com',
+    jwks_uri: '/jwks',
+    given: '/jwks',
+  },
+  {
+    name: 'https issuer and non http jwks_uri',
+    givenIssuer: 'https://issuer.example.com',
+    jwks_uri: 'data:application/json,{}',
+    given: 'data:application/json,{}',
+  },
+  {
+    name: 'https issuer and missing jwks_uri',
+    givenIssuer: 'https://issuer.example.com',
+    jwks_uri: undefined,
+    given: 'undefined',
+  },
+  { name: 'https issuer and null jwks_uri', givenIssuer: 'https://issuer.example.com', jwks_uri: null, given: 'null' },
+  {
+    name: 'https issuer and non string jwks_uri',
+    givenIssuer: 'https://issuer.example.com',
+    jwks_uri: 42,
+    given: 'number',
+  },
+  {
+    // stringifies to a valid url, but is not a string
+    name: 'https issuer and array jwks_uri',
+    givenIssuer: 'https://issuer.example.com',
+    jwks_uri: ['https://issuer.example.com/jwks'],
+    given: 'object',
+  },
+  {
+    name: 'http issuer and invalid jwks_uri',
+    givenIssuer: 'http://issuer.example.com',
+    jwks_uri: 'not-a-url',
+    given: 'not-a-url',
+  },
+  {
+    name: 'http issuer and missing jwks_uri',
+    givenIssuer: 'http://issuer.example.com',
+    jwks_uri: undefined,
+    given: 'undefined',
+  },
+])('resolve configuration with $name', async ({ givenIssuer, jwks_uri, given }) => {
   const invalidConfiguration = { ...configuration, issuer: givenIssuer, jwks_uri };
 
   const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
@@ -384,8 +533,9 @@ test.each<{ name: string; givenIssuer: string; jwks_uri: unknown }>([
 
   const oidcConfigurationResolver = createOidcConfigurationResolver(givenIssuer, { fetch });
 
-  await expect(oidcConfigurationResolver()).rejects.toThrow(
-    `Missing or invalid jwks_uri "${String(jwks_uri)}" for issuer "${givenIssuer}"`,
+  await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
+    `Missing or invalid jwks_uri "${given}" for issuer "${givenIssuer}"`,
   );
 
   expect(fetchMocks).toHaveLength(0);
@@ -400,7 +550,8 @@ test('resolve configuration with https issuer and http jwks_uri', async () => {
 
   const oidcConfigurationResolver = createOidcConfigurationResolver(issuer, { fetch });
 
-  await expect(oidcConfigurationResolver()).rejects.toThrow(
+  await expectOidcConfigurationError(
+    oidcConfigurationResolver(),
     'Insecure jwks_uri "http://issuer.example.com/jwks" for https issuer "https://issuer.example.com"',
   );
 

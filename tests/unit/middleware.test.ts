@@ -114,7 +114,7 @@ test('with invalid token', async () => {
         'Invalid token',
         {
           method: 'GET',
-          pathnameSearch: '/resource?key=value',
+          pathname: '/resource',
           error: { name: 'InvalidTokenError', message: '"exp" claim timestamp check failed', cause },
         },
       ],

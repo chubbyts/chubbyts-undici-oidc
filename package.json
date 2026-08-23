@@ -1,7 +1,7 @@
 {
   "name": "@chubbyts/chubbyts-undici-oidc",
   "type": "module",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server.",
   "keywords": [
     "oidc",
@@ -46,11 +46,14 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@chubbyts/chubbyts-dic-config-factory": "^1.0.0",
+    "@chubbyts/chubbyts-dic-types": "^2.3.0",
     "@chubbyts/chubbyts-log-types": "^3.3.0",
     "@chubbyts/chubbyts-undici-server": "^1.2.0",
     "jose": "^6.2.8"
   },
   "devDependencies": {
+    "@chubbyts/chubbyts-dic-config": "^2.3.0",
     "@chubbyts/chubbyts-function-mock": "^2.3.0",
     "@chubbyts/chubbyts-oxlint": "^1.0.1",
     "@stryker-mutator/core": "^9.6.1",

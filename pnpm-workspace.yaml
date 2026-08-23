@@ -3,6 +3,8 @@ allowBuilds:
   protobufjs: false
   ssh2: false
   unrs-resolver: true
+minimumReleaseAgeExclude:
+  - '@chubbyts/chubbyts-dic-config-factory@1.0.0'
 packageExtensions:
   '@stryker-mutator/core':
     dependencies:

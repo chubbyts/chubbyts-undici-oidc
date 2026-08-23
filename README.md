@@ -24,6 +24,8 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 ## Requirements
 
  * node: >=22
+ * [@chubbyts/chubbyts-dic-config-factory][16]: ^1.0.0
+ * [@chubbyts/chubbyts-dic-types][14]: ^2.3.0
  * [@chubbyts/chubbyts-log-types][2]: ^3.3.0
  * [@chubbyts/chubbyts-undici-server][3]: ^1.2.0
  * [jose][4]: ^6.2.8
@@ -33,7 +35,7 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.1.0
+npm i @chubbyts/chubbyts-undici-oidc@^1.2.0
 ```
 
 ## Usage
@@ -114,6 +116,73 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
  * **Outages:** If the issuer is unreachable while the cached configuration or jwks is expired, the last known one keeps being used (a refetch is retried after `cooldown` / `jwksCooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful fetch the error is thrown (`5xx`), within the cooldown immediately without hitting the issuer again. Be aware that a stale jwks still contains keys the issuer removed in the meantime (e.g. a compromised one), so tokens signed with them stay valid for as long as the outage lasts: set `jwksMaxStale` to bound this window (after `jwksMaxAge + jwksMaxStale` since the last successful fetch, verification fails with the last jwks error until a refetch succeeds), `0` disables serving a stale jwks altogether. A failed or invalid discovery / jwks response is reported as `OidcConfigurationError` / `JwksError` (`@chubbyts/chubbyts-undici-oidc/dist/error`, with the original error as `cause`), errors of the fetch implementation itself (dns, connection refused, ...) are passed through as they are.
  * **Custom verifier:** A `TokenVerifier` is just `(token: string) => Promise<JWTPayload>`. Throw an `InvalidTokenError` (`@chubbyts/chubbyts-undici-oidc/dist/error`) to get the `401` response, any other error is rethrown.
 
+### Service factories (chubbyts-dic-config)
+
+The package ships service factories (abstract factories built on [chubbyts-dic-config-factory][16]) for a [chubbyts-dic-config][15] (or any [chubbyts-dic-types][14] compatible) container within `@chubbyts/chubbyts-undici-oidc/dist/service-factory`, configured through `config.chubbyts.oidc`:
+
+```ts
+import type { ConfigFactory } from '@chubbyts/chubbyts-dic-config/dist/dic-config';
+import { createContainerByConfigFactory } from '@chubbyts/chubbyts-dic-config/dist/dic-config';
+import type { OidcConfig } from '@chubbyts/chubbyts-undici-oidc/dist/service-factory';
+import { oidcAuthenticationMiddlewareServiceFactory } from '@chubbyts/chubbyts-undici-oidc/dist/service-factory';
+import type { Middleware } from '@chubbyts/chubbyts-undici-server/dist/server';
+
+const container = createContainerByConfigFactory({
+  chubbyts: {
+    oidc: {
+      issuer: 'https://issuer.example.com', // required
+      audience: 'https://api.example.com', // required
+      realm: 'api',
+      // fetch,
+      // maxAge: 3600,
+      // timeout: 5,
+      // cooldown: 30,
+      // algorithms: ['RS256'],
+      // clockTolerance: 5,
+      // typ: 'at+jwt',
+      // requiredClaims: ['sub', 'iat', 'jti'],
+      // jwksMaxAge: 600,
+      // jwksTimeout: 5,
+      // jwksCooldown: 30,
+      // jwksMaxStale: 3600,
+    } satisfies OidcConfig,
+  },
+  dependencies: {
+    factories: new Map<string, ConfigFactory>([
+      ['oidcAuthenticationMiddleware', oidcAuthenticationMiddlewareServiceFactory()],
+    ]),
+  },
+})();
+
+const oidcAuthenticationMiddleware = container.get<Middleware>('oidcAuthenticationMiddleware');
+```
+
+The `oidcAuthenticationMiddlewareServiceFactory` uses the services `oidcTokenExtractor`, `oidcTokenVerifier` and (the `jwtTokenVerifierServiceFactory` behind it) `oidcConfigurationResolver` of the container if registered, and creates them through the shipped `bearerTokenExtractorServiceFactory`, `jwtTokenVerifierServiceFactory` and `oidcConfigurationResolverServiceFactory` otherwise. Register any of them under its name to replace it (e.g. a custom `TokenVerifier`) or to share it with other services. A `logger` service is used if registered.
+
+#### With names
+
+To protect different parts of an api through different issuers / audiences, the same factories can be registered multiple times with a name: the config is then read from `config.chubbyts.oidc.<name>` and the name gets appended to each service id (`oidcAuthenticationMiddlewareapi`, `oidcTokenVerifierapi`, ...).
+
+```ts
+const container = createContainerByConfigFactory({
+  chubbyts: {
+    oidc: {
+      api: { issuer: 'https://issuer.example.com', audience: 'https://api.example.com', realm: 'api' },
+      admin: { issuer: 'https://admin-issuer.example.com', audience: 'https://admin.example.com', realm: 'admin' },
+    } satisfies Record<string, OidcConfig>,
+  },
+  dependencies: {
+    factories: new Map<string, ConfigFactory>([
+      ['oidcAuthenticationMiddlewareapi', oidcAuthenticationMiddlewareServiceFactory('api')],
+      ['oidcAuthenticationMiddlewareadmin', oidcAuthenticationMiddlewareServiceFactory('admin')],
+    ]),
+  },
+})();
+
+const apiOidcAuthenticationMiddleware = container.get<Middleware>('oidcAuthenticationMiddlewareapi');
+const adminOidcAuthenticationMiddleware = container.get<Middleware>('oidcAuthenticationMiddlewareadmin');
+```
+
 ## Testing against a local OIDC provider
 
 [Keycloak][5] as a docker container is the easiest way to test manually:
@@ -160,3 +229,6 @@ pnpm test:integration --run
 [11]: https://www.rfc-editor.org/rfc/rfc7517
 [12]: https://www.rfc-editor.org/rfc/rfc9068
 [13]: https://www.rfc-editor.org/rfc/rfc6750
+[14]: https://www.npmjs.com/package/@chubbyts/chubbyts-dic-types
+[15]: https://www.npmjs.com/package/@chubbyts/chubbyts-dic-config
+[16]: https://www.npmjs.com/package/@chubbyts/chubbyts-dic-config-factory

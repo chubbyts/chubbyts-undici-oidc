@@ -5,6 +5,7 @@ import { CompactSign, SignJWT, createLocalJWKSet, errors, exportJWK, generateKey
 import { useFunctionMock } from '@chubbyts/chubbyts-function-mock/dist/function-mock';
 import { ServerRequest } from '@chubbyts/chubbyts-undici-server/dist/server';
 import type { OidcConfiguration, OidcConfigurationResolver } from '../../src/discovery';
+import type { JwtTokenVerifierOptions } from '../../src/token';
 import { SUPPORTED_ALGORITHMS, createBearerTokenExtractor, createJwtTokenVerifier } from '../../src/token';
 import { InvalidTokenError, JwksError } from '../../src/error';
 
@@ -62,8 +63,9 @@ const createToken = async (
     iat,
     kid,
     typ,
+    exp,
     withExp = true,
-  }: { iss?: string; aud?: string; iat?: number; kid?: string; typ?: string; withExp?: boolean } = {},
+  }: { iss?: string; aud?: string; iat?: number; kid?: string; typ?: string; exp?: number; withExp?: boolean } = {},
 ): Promise<string> => {
   const signJwt = new SignJWT({ scope: 'openid' })
     .setProtectedHeader({ alg: 'RS256', kid: kid ?? 'key-1', ...(typ ? { typ } : {}) })
@@ -73,7 +75,7 @@ const createToken = async (
     .setIssuedAt(iat);
 
   if (withExp) {
-    signJwt.setExpirationTime((iat ?? Math.floor(Date.now() / 1000)) + 300);
+    signJwt.setExpirationTime(exp ?? (iat ?? Math.floor(Date.now() / 1000)) + 300);
   }
 
   return signJwt.sign(privateKey);
@@ -201,7 +203,7 @@ test('create verifier with all supported algorithms', () => {
   expect(oidcConfigurationResolverMocks).toHaveLength(0);
 });
 
-test.each<{ name: string; options: Record<string, number>; message: string }>([
+test.each<{ name: string; options: Record<string, unknown>; message: string }>([
   {
     name: 'clockTolerance',
     options: { clockTolerance: -1 },
@@ -213,9 +215,19 @@ test.each<{ name: string; options: Record<string, number>; message: string }>([
     message: 'Invalid jwksMaxAge -1: must be a non-negative number of seconds',
   },
   {
+    name: 'jwksMaxAge as string',
+    options: { jwksMaxAge: '600' },
+    message: 'Invalid jwksMaxAge 600: must be a non-negative number of seconds',
+  },
+  {
     name: 'jwksTimeout',
     options: { jwksTimeout: -0.5 },
     message: 'Invalid jwksTimeout -0.5: must be a non-negative number of seconds',
+  },
+  {
+    name: 'jwksTimeout infinite',
+    options: { jwksTimeout: Number.POSITIVE_INFINITY },
+    message: 'Invalid jwksTimeout Infinity: must be a finite number of seconds',
   },
   {
     name: 'jwksCooldown',
@@ -230,9 +242,28 @@ test.each<{ name: string; options: Record<string, number>; message: string }>([
 ])('create verifier with invalid option: $name', ({ options, message }) => {
   const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([]);
 
-  expect(() => createJwtTokenVerifier(oidcConfigurationResolver, { audience: 'audience-1', ...options })).toThrow(
-    message,
-  );
+  expect(() =>
+    createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      ...(options as Partial<JwtTokenVerifierOptions>),
+    }),
+  ).toThrow(message);
+
+  expect(oidcConfigurationResolverMocks).toHaveLength(0);
+});
+
+test('create verifier with infinite durations', () => {
+  const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([]);
+
+  expect(
+    createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      clockTolerance: Number.POSITIVE_INFINITY,
+      jwksMaxAge: Number.POSITIVE_INFINITY,
+      jwksCooldown: Number.POSITIVE_INFINITY,
+      jwksMaxStale: Number.POSITIVE_INFINITY,
+    }),
+  ).toBeInstanceOf(Function);
 
   expect(oidcConfigurationResolverMocks).toHaveLength(0);
 });
@@ -635,8 +666,6 @@ test('verify token with non json payload', async () => {
 });
 
 test('verify token with unsupported algorithm', async () => {
-  const { jwks } = await createKeyAndJwks();
-
   const token = await new SignJWT({ scope: 'openid' })
     .setProtectedHeader({ alg: 'HS256', kid: 'key-1' })
     .setIssuer(issuer)
@@ -648,18 +677,15 @@ test('verify token with unsupported algorithm', async () => {
     { parameters: [], return: Promise.resolve(configuration) },
   ]);
 
-  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
-    {
-      callback: async () => createJwksResponse(jwks),
-    },
-  ]);
+  // rejected by the default algorithms allow-list, before the jwks gets fetched
+  const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([]);
 
   const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, { audience: 'audience-1', fetch });
 
   await expectInvalidTokenError(
     tokenVerifier(token),
-    'Unsupported "alg" value for a JSON Web Key Set',
-    errors.JOSENotSupported,
+    '"alg" (Algorithm) Header Parameter value not allowed',
+    errors.JOSEAlgNotAllowed,
   );
 
   expect(oidcConfigurationResolverMocks).toHaveLength(0);
@@ -1182,6 +1208,82 @@ test('verify token with expired jwks cache and failed refresh beyond max stale',
 
     // the stale jwks got imported once, not once per verification
     expect(createLocalJWKSet).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1);
+
+    // max stale reached (within cooldown): the stale jwks is not used anymore, fail with the last jwks error
+    await expectJwksError(
+      tokenVerifier(token),
+      'Expected 200 OK from the JSON Web Key Set HTTP response',
+      errors.JOSEError,
+    );
+    expect(fetchMocks).toHaveLength(1);
+
+    vi.advanceTimersByTime(9999);
+
+    // after cooldown: fetch again, success revives the verification
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(0);
+
+    expect(oidcConfigurationResolverMocks).toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('verify token with expired jwks cache and failed refresh beyond default max stale', async () => {
+  vi.useFakeTimers();
+
+  try {
+    const { privateKey, jwks } = await createKeyAndJwks();
+
+    // the token must outlive the default max stale of one hour
+    const token = await createToken(privateKey, { exp: Math.floor(Date.now() / 1000) + 7200 });
+
+    const [oidcConfigurationResolver, oidcConfigurationResolverMocks] = useFunctionMock<OidcConfigurationResolver>([
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+      { parameters: [], return: Promise.resolve(configuration) },
+    ]);
+
+    const [fetch, fetchMocks] = useFunctionMock<typeof globalThis.fetch>([
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+      {
+        callback: async () => new Response('Internal Server Error', { status: 500 }),
+      },
+      {
+        callback: async () => new Response('Internal Server Error', { status: 500 }),
+      },
+      {
+        callback: async () => createJwksResponse(jwks),
+      },
+    ]);
+
+    const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
+      audience: 'audience-1',
+      fetch,
+      jwksMaxAge: 10,
+      jwksCooldown: 10,
+    });
+
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(3);
+
+    vi.advanceTimersByTime(10000);
+
+    // expired cache, failed refresh: verify against the stale jwks
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(2);
+
+    vi.advanceTimersByTime(3600000 - 1);
+
+    // after cooldown, failed refresh again, one millisecond before the default max stale of one hour: still stale
+    expect(await tokenVerifier(token)).toEqual(expect.objectContaining({ sub: 'subject-1' }));
+    expect(fetchMocks).toHaveLength(1);
 
     vi.advanceTimersByTime(1);
 

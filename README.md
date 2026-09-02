@@ -35,7 +35,7 @@ A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.2.0
+npm i @chubbyts/chubbyts-undici-oidc@^1.3.0
 ```
 
 ## Usage
@@ -90,7 +90,7 @@ const oidcConfigurationResolver = createOidcConfigurationResolver('https://issue
 // verifies signature (via the issuer's JWKS), "iss", "aud", "exp", "nbf" and returns the claims
 const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
   audience: 'https://api.example.com', // string | Array<string>, required (non-empty, enforced at runtime)
-  algorithms: ['RS256'], // non-empty subset of SUPPORTED_ALGORITHMS, default: any asymmetric algorithm supported by jose
+  algorithms: ['RS256'], // non-empty subset of SUPPORTED_ALGORITHMS, default: SUPPORTED_ALGORITHMS
   clockTolerance: 5, // seconds (non-negative), default: 0
   typ: 'at+jwt', // expected "typ" header, default: not checked
   requiredClaims: ['sub', 'iat', 'jti'], // additionally required claims, "iss", "aud" and "exp" always are
@@ -98,7 +98,7 @@ const tokenVerifier = createJwtTokenVerifier(oidcConfigurationResolver, {
   jwksMaxAge: 600, // seconds a fetched jwks is cached (non-negative), default: 600
   jwksTimeout: 5, // seconds until a jwks request is aborted (non-negative), default: 5
   jwksCooldown: 30, // seconds until a failed jwks (re)fetch is retried, and between refetches for unknown key ids (non-negative), default: 30
-  jwksMaxStale: 3600, // seconds an expired jwks keeps being used while its refetch fails (non-negative, 0: never), default: Infinity
+  jwksMaxStale: 86400, // seconds an expired jwks keeps being used while its refetch fails (non-negative, 0: never, Infinity: for as long as the outage lasts), default: 3600
 });
 
 const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
@@ -111,9 +111,9 @@ const oidcAuthenticationMiddleware = createOidcAuthenticationMiddleware(
 
  * **Issuer:** Must be exactly the `issuer` from the openid configuration (`iss` claim), `https://issuer.example.com` and `https://issuer.example.com/` are not the same. Only absolute `http(s)` urls are accepted. Use `https` in production, whoever can tamper with an unprotected discovery or jwks response can forge tokens your api accepts, plain `http` is only meant for local development. A `https` issuer advertising a plain `http` `jwks_uri` is rejected in any case, and neither the discovery nor the jwks request follows redirects (a `https` → `http` redirect would silently bypass these checks).
  * **Algorithms:** Only asymmetric signature algorithms are supported (`SUPPORTED_ALGORITHMS` within `@chubbyts/chubbyts-undici-oidc/dist/token`: `EdDSA`, `Ed25519`, `ES256`, `ES384`, `ES512`, `ML-DSA-44`, `ML-DSA-65`, `ML-DSA-87`, `PS256`, `PS384`, `PS512`, `RS256`, `RS384`, `RS512`): a public (jwks) key must never be usable as a hmac secret (algorithm confusion). Anything else, including `HS*`, is rejected at construction time (`algorithms` option) or verification time (token header).
- * **Options:** Invalid options (empty or unsupported `algorithms`, negative durations, empty `audience`) throw at construction time instead of silently rejecting every token.
+ * **Options:** Invalid options (empty or unsupported `algorithms`, negative or non-numeric durations, infinite timeouts, empty `audience`) throw at construction time instead of silently rejecting every token.
  * **JWKS:** Fetched from the `jwks_uri` of the openid configuration and cached in memory for `jwksMaxAge`, an unknown key id (key rotation) triggers a refetch, but at most once per `jwksCooldown`.
- * **Outages:** If the issuer is unreachable while the cached configuration or jwks is expired, the last known one keeps being used (a refetch is retried after `cooldown` / `jwksCooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful fetch the error is thrown (`5xx`), within the cooldown immediately without hitting the issuer again. Be aware that a stale jwks still contains keys the issuer removed in the meantime (e.g. a compromised one), so tokens signed with them stay valid for as long as the outage lasts: set `jwksMaxStale` to bound this window (after `jwksMaxAge + jwksMaxStale` since the last successful fetch, verification fails with the last jwks error until a refetch succeeds), `0` disables serving a stale jwks altogether. A failed or invalid discovery / jwks response is reported as `OidcConfigurationError` / `JwksError` (`@chubbyts/chubbyts-undici-oidc/dist/error`, with the original error as `cause`), errors of the fetch implementation itself (dns, connection refused, ...) are passed through as they are.
+ * **Outages:** If the issuer is unreachable while the cached configuration or jwks is expired, the last known one keeps being used (a refetch is retried after `cooldown` / `jwksCooldown`), so a temporary issuer outage does not take your api down. Only if there never was a successful fetch the error is thrown (`5xx`), within the cooldown immediately without hitting the issuer again. Be aware that a stale jwks still contains keys the issuer removed in the meantime (e.g. a compromised one), so tokens signed with them stay valid while the stale jwks is used: `jwksMaxStale` bounds this window (default: one hour, after `jwksMaxAge + jwksMaxStale` since the last successful fetch, verification fails with the last jwks error until a refetch succeeds), `0` disables serving a stale jwks altogether, `Infinity` keeps using it for as long as the outage lasts. A failed or invalid discovery / jwks response is reported as `OidcConfigurationError` / `JwksError` (`@chubbyts/chubbyts-undici-oidc/dist/error`, with the original error as `cause`), errors of the fetch implementation itself (dns, connection refused, ...) are passed through as they are.
  * **Custom verifier:** A `TokenVerifier` is just `(token: string) => Promise<JWTPayload>`. Throw an `InvalidTokenError` (`@chubbyts/chubbyts-undici-oidc/dist/error`) to get the `401` response, any other error is rethrown.
 
 ### Service factories (chubbyts-dic-config)
@@ -144,7 +144,7 @@ const container = createContainerByConfigFactory({
       // jwksMaxAge: 600,
       // jwksTimeout: 5,
       // jwksCooldown: 30,
-      // jwksMaxStale: 3600,
+      // jwksMaxStale: 86400,
     } satisfies OidcConfig,
   },
   dependencies: {

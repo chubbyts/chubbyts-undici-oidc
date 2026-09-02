@@ -48,9 +48,20 @@ const describe = (value: unknown): string => {
   return value === null ? 'null' : typeof value;
 };
 
+// typescript enforces a number, but a runtime check protects javascript consumers (or a misconfigured string) from a
+// duration that silently ends up as NaN (a cache which is never valid, ...)
 const assertNonNegative = (name: string, value: number): void => {
-  if (Number.isNaN(value) || value < 0) {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
     throw new Error(`Invalid ${name} ${String(value)}: must be a non-negative number of seconds`);
+  }
+};
+
+// AbortSignal.timeout() throws for Infinity
+const assertFiniteNonNegative = (name: string, value: number): void => {
+  assertNonNegative(name, value);
+
+  if (!Number.isFinite(value)) {
+    throw new Error(`Invalid ${name} ${String(value)}: must be a finite number of seconds`);
   }
 };
 
@@ -65,7 +76,7 @@ export const createOidcConfigurationResolver = (
   }
 
   assertNonNegative('maxAge', maxAge);
-  assertNonNegative('timeout', timeout);
+  assertFiniteNonNegative('timeout', timeout);
   assertNonNegative('cooldown', cooldown);
 
   const url = `${stripTrailingSlashes(issuer)}/.well-known/openid-configuration`;

@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest';
 import { useFunctionMock } from '@chubbyts/chubbyts-function-mock/dist/function-mock';
-import type { OidcConfiguration } from '../../src/discovery';
+import type { OidcConfiguration, OidcConfigurationResolverOptions } from '../../src/discovery';
 import { createOidcConfigurationResolver } from '../../src/discovery';
 import { OidcConfigurationError } from '../../src/error';
 
@@ -50,12 +50,22 @@ test.each<{ name: string; issuer: string }>([
   );
 });
 
-test.each<{ name: string; options: Record<string, number>; message: string }>([
+test.each<{ name: string; options: Record<string, unknown>; message: string }>([
   { name: 'maxAge', options: { maxAge: -1 }, message: 'Invalid maxAge -1: must be a non-negative number of seconds' },
+  {
+    name: 'maxAge as string',
+    options: { maxAge: '3600' },
+    message: 'Invalid maxAge 3600: must be a non-negative number of seconds',
+  },
   {
     name: 'timeout',
     options: { timeout: -0.5 },
     message: 'Invalid timeout -0.5: must be a non-negative number of seconds',
+  },
+  {
+    name: 'timeout infinite',
+    options: { timeout: Number.POSITIVE_INFINITY },
+    message: 'Invalid timeout Infinity: must be a finite number of seconds',
   },
   {
     name: 'cooldown',
@@ -63,7 +73,13 @@ test.each<{ name: string; options: Record<string, number>; message: string }>([
     message: 'Invalid cooldown NaN: must be a non-negative number of seconds',
   },
 ])('create resolver with invalid option: $name', ({ options, message }) => {
-  expect(() => createOidcConfigurationResolver(issuer, options)).toThrow(message);
+  expect(() => createOidcConfigurationResolver(issuer, options as OidcConfigurationResolverOptions)).toThrow(message);
+});
+
+test('create resolver with infinite durations', () => {
+  expect(
+    createOidcConfigurationResolver(issuer, { maxAge: Number.POSITIVE_INFINITY, cooldown: Number.POSITIVE_INFINITY }),
+  ).toBeInstanceOf(Function);
 });
 
 test('resolve configuration', async () => {

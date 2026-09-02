@@ -67,9 +67,20 @@ const isNonEmptyAudience = (value: unknown): value is string | Array<string> => 
 
 const quote = (values: ReadonlyArray<string>): string => values.map((value) => `"${value}"`).join(', ');
 
+// typescript enforces a number, but a runtime check protects javascript consumers (or a misconfigured string) from a
+// duration that silently ends up as NaN (a cache which is never valid, ...)
 const assertNonNegative = (name: string, value: number): void => {
-  if (Number.isNaN(value) || value < 0) {
+  if (typeof value !== 'number' || Number.isNaN(value) || value < 0) {
     throw new Error(`Invalid ${name} ${String(value)}: must be a non-negative number of seconds`);
+  }
+};
+
+// AbortSignal.timeout() throws for Infinity
+const assertFiniteNonNegative = (name: string, value: number): void => {
+  assertNonNegative(name, value);
+
+  if (!Number.isFinite(value)) {
+    throw new Error(`Invalid ${name} ${String(value)}: must be a finite number of seconds`);
   }
 };
 
@@ -124,6 +135,9 @@ export const createJwtTokenVerifier = (
 
   assertSupportedAlgorithms(options.algorithms);
 
+  // jose rejects symmetric algorithms for a jwks anyway, but an explicit allow-list does not rely on that
+  const algorithms = options.algorithms ?? [...SUPPORTED_ALGORITHMS];
+
   // "iss" and "aud" get required by jose through the issuer / audience options, "exp" needs to be required explicitly,
   // otherwise a token without expiration would be valid forever
   const requiredClaims = ['exp', ...(options.requiredClaims ?? [])];
@@ -133,12 +147,14 @@ export const createJwtTokenVerifier = (
     jwksMaxAge = 600,
     jwksTimeout = 5,
     jwksCooldown = 30,
-    jwksMaxStale = Number.POSITIVE_INFINITY,
+    // bounded by default: a key the issuer removed (e.g. a compromised one) must not stay valid for as long as a jwks
+    // outage lasts, Infinity trades this for availability
+    jwksMaxStale = 3600,
   } = options;
 
   assertNonNegative('clockTolerance', clockTolerance);
   assertNonNegative('jwksMaxAge', jwksMaxAge);
-  assertNonNegative('jwksTimeout', jwksTimeout);
+  assertFiniteNonNegative('jwksTimeout', jwksTimeout);
   assertNonNegative('jwksCooldown', jwksCooldown);
   assertNonNegative('jwksMaxStale', jwksMaxStale);
 
@@ -233,7 +249,7 @@ export const createJwtTokenVerifier = (
       const { payload } = await jwtVerify(token, resolveJwkSet(configuration.jwks_uri), {
         issuer: configuration.issuer,
         audience: options.audience,
-        algorithms: options.algorithms,
+        algorithms,
         clockTolerance,
         typ: options.typ,
         requiredClaims,

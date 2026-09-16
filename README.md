@@ -21,6 +21,14 @@
 
 A minimal OIDC (OpenID Connect) resource server integration for chubbyts-undici-server: resolves the issuer's [openid configuration][10], verifies JWT bearer tokens against its [JWKS][11] and passes the verified claims to the handler via request attributes.
 
+### How it fits into OpenID Connect
+
+The library is the resource server: it verifies the access token of a request, no matter how the client obtained it. The following flow diagrams show the common ways, the responsibilities of each party and the parts of this library involved:
+
+ * [Frontend flow](doc/flow/frontend.md): a browser app (SPA) logs the user in with the Authorization Code Flow with PKCE and calls the backend with the access token.
+ * [Backend flow](doc/flow/backend.md): a server-side web app (backend for frontend) logs the user in, keeps the tokens in a session behind a cookie and calls the backend with the access token.
+ * [Machine-to-machine flow](doc/flow/machine-to-machine.md): a service gets an access token for itself with the Client Credentials Grant, no user involved, and calls the backend with it.
+
 ## Requirements
 
  * node: >=22

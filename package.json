@@ -17,11 +17,11 @@
   "repository": "chubbyts/chubbyts-undici-oidc",
   "scripts": {
     "build": "rm -Rf dist && tsc",
-    "cs-fix": "prettier --write src tests",
-    "cs": "prettier --check src tests",
+    "cs-fix": "prettier --write src tests resources",
+    "cs": "prettier --check src tests resources",
     "infection": "stryker run",
-    "lint-fix": "oxlint --fix src tests vitest.config.ts vitest.integration.config.ts",
-    "lint": "oxlint src tests vitest.config.ts vitest.integration.config.ts",
+    "lint-fix": "oxlint --fix src tests resources vitest.config.ts vitest.integration.config.ts",
+    "lint": "oxlint src tests resources vitest.config.ts vitest.integration.config.ts",
     "prepare": "pnpm run build",
     "test:integration": "vitest --config vitest.integration.config.ts",
     "test": "vitest"

@@ -43,7 +43,7 @@ The library is the resource server: it verifies the access token of a request, n
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.3.0
+npm i @chubbyts/chubbyts-undici-oidc@^1.3.1
 ```
 
 ## Usage

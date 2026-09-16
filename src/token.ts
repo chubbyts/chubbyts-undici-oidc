@@ -80,7 +80,7 @@ const assertFiniteNonNegative = (name: string, value: number): void => {
   assertNonNegative(name, value);
 
   if (!Number.isFinite(value)) {
-    throw new Error(`Invalid ${name} ${String(value)}: must be a finite number of seconds`);
+    throw new TypeError(`Invalid ${name} ${String(value)}: must be a finite number of seconds`);
   }
 };
 

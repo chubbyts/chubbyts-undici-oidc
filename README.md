@@ -32,18 +32,18 @@ The library is the resource server: it verifies the access token of a request, n
 ## Requirements
 
  * node: >=22
- * [@chubbyts/chubbyts-dic-config-factory][16]: ^1.0.0
- * [@chubbyts/chubbyts-dic-types][14]: ^2.3.0
- * [@chubbyts/chubbyts-log-types][2]: ^3.3.0
- * [@chubbyts/chubbyts-undici-server][3]: ^1.2.0
- * [jose][4]: ^6.2.8
+ * [@chubbyts/chubbyts-dic-config-factory][16]: ^1.0.1
+ * [@chubbyts/chubbyts-dic-types][14]: ^2.3.1
+ * [@chubbyts/chubbyts-log-types][2]: ^3.3.1
+ * [@chubbyts/chubbyts-undici-server][3]: ^1.3.1
+ * [jose][4]: ^6.2.12
 
 ## Installation
 
 Through [NPM](https://www.npmjs.com) as [@chubbyts/chubbyts-undici-oidc][1].
 
 ```sh
-npm i @chubbyts/chubbyts-undici-oidc@^1.3.1
+npm i @chubbyts/chubbyts-undici-oidc@^1.3.2
 ```
 
 ## Usage
